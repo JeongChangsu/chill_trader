@@ -8,12 +8,22 @@ import numpy as np
 import pandas as pd
 import ta
 import undetected_chromedriver as uc  # 무료 데이터 크롤링용 stealth driver
+import logging
 from datetime import datetime
 from selenium.webdriver.common.by import By
 from openai import OpenAI
 
 # ===========================================
-# Global Settings & API Initialization
+# 로그 설정 (모든 로그를 한국어로 출력)
+# ===========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# ===========================================
+# 글로벌 상수 및 API 초기화
 # ===========================================
 SYMBOL = "BTC/USDT"
 DECISIONS_LOG_FILE = "trading_decisions.csv"
@@ -31,11 +41,35 @@ TIMEFRAMES = {
 openai_api_key = os.environ.get('OPENAI_API_KEY')
 client = OpenAI(api_key=openai_api_key)
 
+# 텔레그램 메시지 전송을 위한 환경변수 (텔레그램 봇 토큰과 채팅 ID)
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+# ===========================================
+# 텔레그램 메시지 전송 함수
+# ===========================================
+def send_telegram_message(message):
+    if TELEGRAM_BOT_TOKEN is None or TELEGRAM_CHAT_ID is None:
+        logging.error("텔레그램 봇 토큰 또는 채팅 ID가 설정되지 않았습니다.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    params = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message
+    }
+    try:
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            logging.info("텔레그램 메시지 전송 성공")
+        else:
+            logging.error(f"텔레그램 메시지 전송 실패 (상태 코드: {response.status_code})")
+    except Exception as e:
+        logging.error(f"텔레그램 메시지 전송 중 오류 발생: {e}")
+
 # ===========================================
 # Persistent Driver Setup for Data Crawling
 # ===========================================
 drivers = {}
-
 
 def create_driver():
     """새로운 undetected_chromedriver 인스턴스를 생성합니다."""
@@ -43,7 +77,6 @@ def create_driver():
     # 필요 시 headless 모드 등 옵션 설정 가능
     driver = uc.Chrome(options=options)
     return driver
-
 
 def get_driver(session_id='default_session'):
     global drivers
@@ -53,7 +86,6 @@ def get_driver(session_id='default_session'):
         driver = create_driver()
         drivers[session_id] = driver
         return driver
-
 
 # ===========================================
 # 1. 데이터 수집 및 기술적 지표 계산
@@ -65,14 +97,14 @@ def fetch_ohlcv(symbol, timeframe, limit=300):
     exchange = ccxt.binance()
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        logging.info(f"{symbol} / {timeframe} OHLCV 데이터 수집 성공")
     except Exception as e:
-        print(f"Error fetching OHLCV for {symbol} on {timeframe}: {e}")
+        logging.error(f"{symbol} / {timeframe} OHLCV 데이터를 가져오는 중 오류 발생: {e}")
         return None
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     return df
-
 
 def compute_technical_indicators(df):
     """
@@ -104,8 +136,8 @@ def compute_technical_indicators(df):
     df['ma50_diff'] = (df['close'] - df['sma50']) / df['sma50'] * 100
     df['ma200_diff'] = (df['close'] - df['sma200']) / df['sma200'] * 100
 
+    logging.info("기술적 지표 계산 완료")
     return df
-
 
 def fetch_order_book(symbol):
     """
@@ -117,11 +149,11 @@ def fetch_order_book(symbol):
         bid = order_book['bids'][0][0] if order_book['bids'] else None
         ask = order_book['asks'][0][0] if order_book['asks'] else None
         spread = round(ask - bid, 2) if bid and ask else None
+        logging.info(f"{symbol} 주문서 데이터 수집 완료")
     except Exception as e:
-        print(f"Error fetching order book for {symbol}: {e}")
+        logging.error(f"{symbol} 주문서 데이터를 가져오는 중 오류 발생: {e}")
         bid = ask = spread = None
     return {"bid": bid, "ask": ask, "spread": spread}
-
 
 # ===========================================
 # 1-2. 확장 데이터 수집 (크롤링, 온체인 데이터 등)
@@ -133,7 +165,7 @@ def fetch_exchange_inflows():
     """
     url = "https://cryptoquant.com/asset/btc/chart/exchange-flows"  # 예시 URL
     try:
-        driver = get_driver('exchange_inflows')
+        driver = get_driver()
         driver.get(url)
         time.sleep(3)
         netflow_all_text = driver.find_element(By.XPATH, '//tbody[@class="ant-table-tbody"]/tr[6]').text
@@ -153,11 +185,11 @@ def fetch_exchange_inflows():
         if '거래소 순입출금량' in netflow_all_text:
             netflow_text = netflow_all_text.split('\n')[-2]
             net_inflow = parse_value(netflow_text)
+            logging.info("거래소 유입/유출 데이터 크롤링 성공")
             return net_inflow
     except Exception as e:
-        print(f"Error crawling net exchange inflows: {e}")
+        logging.error(f"거래소 순입출금량 크롤링 중 오류 발생: {e}")
         return "N/A"
-
 
 def fetch_funding_rate(symbol):
     """
@@ -167,11 +199,11 @@ def fetch_funding_rate(symbol):
         futures_exchange = ccxt.binance({'options': {'defaultType': 'future'}})
         funding_info = futures_exchange.fetch_funding_rate(symbol=symbol)
         latest_funding = funding_info['info']['lastFundingRate'] if 'info' in funding_info else None
+        logging.info(f"{symbol} 펀딩율 데이터 수집 성공")
         return latest_funding
     except Exception as e:
-        print(f"Error fetching funding rate for {symbol}: {e}")
+        logging.error(f"{symbol} 펀딩율 데이터를 가져오는 중 오류 발생: {e}")
         return "N/A"
-
 
 def fetch_open_interest(symbol):
     """
@@ -182,11 +214,11 @@ def fetch_open_interest(symbol):
         symbol_futures = symbol.replace("/", "")
         oi_response = futures_exchange.fetch_open_interest(symbol=symbol_futures)
         open_interest = oi_response['openInterest'] if oi_response and 'openInterest' in oi_response else None
+        logging.info(f"{symbol} 미결제약정 데이터 수집 성공")
         return open_interest
     except Exception as e:
-        print(f"Error fetching open interest for {symbol}: {e}")
+        logging.error(f"{symbol} 미결제약정 데이터를 가져오는 중 오류 발생: {e}")
         return "N/A"
-
 
 def fetch_fear_and_greed_index():
     """
@@ -197,11 +229,11 @@ def fetch_fear_and_greed_index():
         data = response.json()
         value = data['data'][0]['value'] if 'data' in data and len(data['data']) > 0 else None
         classification = data['data'][0]['value_classification'] if 'data' in data and len(data['data']) > 0 else None
+        logging.info("Fear & Greed Index 데이터 수집 성공")
         return classification, value
     except Exception as e:
-        print(f"Error fetching Fear & Greed Index: {e}")
+        logging.error(f"Fear & Greed Index 데이터를 가져오는 중 오류 발생: {e}")
         return None, None
-
 
 def fetch_onchain_data(symbol):
     """
@@ -209,20 +241,24 @@ def fetch_onchain_data(symbol):
     실제 운영 시 Glassnode, CryptoQuant, Coin Metrics 등의 API를 활용할 수 있습니다.
     여기서는 예시로 더미 데이터를 사용합니다.
     """
-    driver = get_driver('chill_trader')
-    driver.get('https://kr.tradingview.com/chart/?symbol=INTOTHEBLOCK%3ABTC_MVRV')
-    time.sleep(3)
+    try:
+        driver = get_driver()
+        driver.get('https://kr.tradingview.com/chart/?symbol=INTOTHEBLOCK%3ABTC_MVRV')
+        time.sleep(3)
+        mvrv_text = driver.find_element(By.XPATH, '//span[contains(@class, "priceWrapper")]/span').text
+        mvrv = float(mvrv_text.replace(",", ""))
 
-    mvrv = float(driver.find_element(By.XPATH, '//span[contains(@class, "priceWrapper")]/span').text)
+        driver.get('https://kr.tradingview.com/chart/?symbol=GLASSNODE%3ABTC_SOPR')
+        time.sleep(3)
+        sopr_text = driver.find_element(By.XPATH, '//span[contains(@class, "priceWrapper")]/span').text
+        sopr = float(sopr_text.replace(",", ""))
 
-    driver.get('https://kr.tradingview.com/chart/?symbol=GLASSNODE%3ABTC_SOPR')
-    time.sleep(3)
-
-    sopr = float(driver.find_element(By.XPATH, '//span[contains(@class, "priceWrapper")]/span').text)
-
-    driver.quit()
-    return {"mvrv": mvrv, "sopr": sopr}
-
+        driver.quit()
+        logging.info("온체인 데이터 (MVRV, SOPR) 수집 성공")
+        return {"mvrv": mvrv, "sopr": sopr}
+    except Exception as e:
+        logging.error(f"온체인 데이터를 가져오는 중 오류 발생: {e}")
+        return {"mvrv": "N/A", "sopr": "N/A"}
 
 def fetch_multi_tf_data(symbol, timeframes=None, limit=300):
     """
@@ -254,8 +290,8 @@ def fetch_multi_tf_data(symbol, timeframes=None, limit=300):
             "mfi": round(latest['mfi'], 2) if not np.isnan(latest['mfi']) else None,
             "timestamp": latest['timestamp']
         }
+    logging.info("다중 타임프레임 데이터 및 지표 계산 완료")
     return multi_tf_data
-
 
 # ===========================================
 # 2. 시장 장세 판단 및 동적 지표 기준 조정
@@ -271,6 +307,7 @@ def determine_market_regime(multi_tf_data, onchain_data):
     """
     data = multi_tf_data.get("1h")
     if data is None:
+        logging.warning("1시간봉 데이터가 없어 중립(m-neutral)으로 판정")
         return "neutral"
     current_price = data["current_price"]
     sma50 = data["sma50"]
@@ -289,10 +326,11 @@ def determine_market_regime(multi_tf_data, onchain_data):
             base_regime = "neutral"
 
     # 온체인 데이터 보정 (예시: MVRV와 SOPR 모두 1 미만이면 지나치게 과매도 상태 -> 중립으로 판단)
-    if onchain_data["mvrv"] < 1 and onchain_data["sopr"] < 1:
-        return "neutral"
+    if onchain_data["mvrv"] != "N/A" and onchain_data["sopr"] != "N/A":
+        if onchain_data["mvrv"] < 1 and onchain_data["sopr"] < 1:
+            logging.info("온체인 지표가 극단적이어서 시장 장세를 중립으로 보정")
+            return "neutral"
     return base_regime
-
 
 def adjust_indicator_thresholds(market_regime):
     """
@@ -302,25 +340,25 @@ def adjust_indicator_thresholds(market_regime):
         thresholds = {
             "rsi_oversold": 45,
             "rsi_overbought": 80,
-            "macd_comment": "In bullish conditions, ignore minor bearish MACD crosses; wait for deep pullbacks to enter.",
-            "ma_comment": "Buy pullbacks when price touches the 50MA acting as dynamic support."
+            "macd_comment": "강한 상승장에서는 가벼운 하락 MACD 크로스는 무시하고, 깊은 조정 시 진입 고려.",
+            "ma_comment": "50MA 지지선에서 반등 시 매수 고려."
         }
     elif market_regime == "bear":
         thresholds = {
             "rsi_oversold": 20,
             "rsi_overbought": 55,
-            "macd_comment": "In bearish conditions, ignore minor bullish MACD crosses; wait for confirmed momentum continuation.",
-            "ma_comment": "Sell rallies when price touches the 50MA acting as resistance."
+            "macd_comment": "하락장에서는 가벼운 상승 MACD 크로스는 무시하고, 모멘텀 확인 시 진입 고려.",
+            "ma_comment": "50MA 저항선에서 반등 시 매도 고려."
         }
     else:  # neutral
         thresholds = {
             "rsi_oversold": 30,
             "rsi_overbought": 70,
-            "macd_comment": "Use MACD crosses as a secondary confirmation in a neutral market.",
-            "ma_comment": "Apply mean reversion strategies around the 50MA in neutral conditions."
+            "macd_comment": "중립장에서는 MACD 크로스를 보조 신호로 활용.",
+            "ma_comment": "50MA 주변에서 평균 회귀 전략 적용."
         }
+    logging.info(f"시장 장세({market_regime})에 따른 지표 기준 설정 완료")
     return thresholds
-
 
 def choose_primary_timeframe(multi_tf_data):
     """
@@ -336,8 +374,8 @@ def choose_primary_timeframe(multi_tf_data):
             if diff > max_diff:
                 max_diff = diff
                 primary_tf = tf
+    logging.info(f"주 타임프레임으로 '{primary_tf}' 선택 (SMA200 대비 최대 이격률: {max_diff:.2%})")
     return primary_tf
-
 
 # ===========================================
 # 3. GPT 프롬프트 생성 및 매매 결정
@@ -479,7 +517,6 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
     """
     return prompt
 
-
 def generate_trading_decision(wallet_balance, position_info, aggregated_data, extended_data, onchain_data,
                               multi_tf_data, market_regime, thresholds):
     prompt = generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended_data, onchain_data,
@@ -500,7 +537,6 @@ def generate_trading_decision(wallet_balance, position_info, aggregated_data, ex
     )
     return response.choices[0].message.content
 
-
 def parse_trading_decision(response_text):
     """
     GPT의 응답을 파싱합니다.
@@ -509,7 +545,7 @@ def parse_trading_decision(response_text):
     response_text = response_text.strip()
     parts = [part.strip() for part in re.split(r'\s*,\s*', response_text)]
     if len(parts) < 7:
-        raise ValueError("Incomplete response. Expected at least 7 comma-separated fields.")
+        raise ValueError("응답이 불완전합니다. 최소 7개의 콤마로 구분된 필드가 필요합니다.")
     decision = {
         "final_action": parts[0],
         "leverage": parts[1],
@@ -520,7 +556,6 @@ def parse_trading_decision(response_text):
         "rationale": ", ".join(parts[6:])
     }
     return decision
-
 
 # ===========================================
 # 4. 포지션 로깅 함수들
@@ -535,7 +570,7 @@ def log_decision(decision, symbol):
         writer.writerow([datetime.utcnow(), symbol, decision["final_action"], decision["leverage"],
                          decision["trade_term"], decision["tp_price"], decision["sl_price"],
                          decision["limit_order_price"], decision["rationale"]])
-
+    logging.info("매매 결정이 로그 파일에 기록되었습니다.")
 
 def log_open_position(symbol, decision, entry_price):
     file_exists = os.path.isfile(OPEN_POSITIONS_FILE)
@@ -548,7 +583,7 @@ def log_open_position(symbol, decision, entry_price):
         writer.writerow([datetime.utcnow(), symbol, decision["final_action"], entry_price, decision["leverage"],
                          decision["trade_term"], decision["tp_price"], decision["sl_price"],
                          decision["limit_order_price"], decision["rationale"]])
-
+    logging.info(f"{symbol} 포지션 개시 로그 기록됨 (진입가: {entry_price}).")
 
 def log_closed_position(symbol, entry_price, exit_price, trade_side):
     profit = (exit_price - entry_price) if trade_side.upper() == "LONG" else (entry_price - exit_price)
@@ -558,7 +593,7 @@ def log_closed_position(symbol, entry_price, exit_price, trade_side):
         if not file_exists:
             writer.writerow(["timestamp", "symbol", "trade_side", "entry_price", "exit_price", "profit"])
         writer.writerow([datetime.utcnow(), symbol, trade_side, entry_price, exit_price, profit])
-
+    logging.info(f"{symbol} 포지션 종료 로그 기록됨 (수익: {profit}).")
 
 # ===========================================
 # 5. 포지션 관리 및 메인 트레이딩 로직
@@ -582,11 +617,12 @@ def compute_risk_reward(decision, entry_price):
             return None
         if risk <= 0:
             return None
-        return reward / risk
+        rr_ratio = reward / risk
+        logging.info(f"위험/보상 비율 계산 결과: {rr_ratio:.2f}")
+        return rr_ratio
     except Exception as e:
-        print("Error computing risk-reward:", e)
+        logging.error(f"위험/보상 비율 계산 중 오류 발생: {e}")
         return None
-
 
 def fetch_additional_data(symbol):
     """
@@ -608,10 +644,11 @@ def fetch_additional_data(symbol):
         "open_interest": open_interest,
         "fear_and_greed_index": fear_and_greed  # Tuple (classification, value)
     }
+    logging.info("확장 데이터 및 온체인 데이터 수집 완료")
     return extended_data, onchain
 
-
 def main():
+    logging.info("트레이딩 봇 실행 시작")
     wallet_balance = "1000 USDT"
     position_info = "NONE"  # 초기 포지션 정보
     in_position = False
@@ -621,11 +658,12 @@ def main():
     # 다중 타임프레임 데이터 수집 (5m, 15m, 1h, 4h, 1d)
     multi_tf_data = fetch_multi_tf_data(SYMBOL, timeframes=["5m", "15m", "1h", "4h", "1d"], limit=300)
     if not multi_tf_data or "1h" not in multi_tf_data:
-        print("Not enough data fetched.")
+        logging.error("데이터를 충분히 수집하지 못했습니다.")
         return
 
     # 1시간봉 기준 현재 가격
     current_price = multi_tf_data["1h"]["current_price"]
+    logging.info(f"현재 1시간봉 가격: {current_price}")
 
     # 확장 데이터 (주문서, 펀딩율, 미결제약정, 거래소 유입/유출, Fear & Greed Index, 온체인 데이터)
     extended_data, onchain_data = fetch_additional_data(SYMBOL)
@@ -635,7 +673,6 @@ def main():
     bearish_count = 0
     tf_directions = {}
     for tf, data in multi_tf_data.items():
-        # 단순히 현재 가격과 SMA200의 비교로 bullish/bearish를 결정합니다.
         if data["sma200"] is not None and data["current_price"] > data["sma200"]:
             bullish_count += 1
             tf_directions[tf] = "bullish"
@@ -644,59 +681,74 @@ def main():
             tf_directions[tf] = "bearish"
     aggregated_trend = "BULL" if bullish_count >= bearish_count else "BEAR"
     aggregated_data = {"trend": aggregated_trend, "timeframe_directions": tf_directions}
+    logging.info(f"타임프레임별 신호: {tf_directions} (집계: {aggregated_trend})")
 
     # 주 타임프레임 선택 (알고리즘적으로 SMA200 대비 이격률이 가장 큰 타임프레임)
     primary_tf = choose_primary_timeframe(multi_tf_data)
     primary_direction = tf_directions.get(primary_tf, None)
-    print(f"Primary timeframe selected: {primary_tf} with direction: {primary_direction}")
+    logging.info(f"주 타임프레임: {primary_tf} (방향: {primary_direction})")
 
-    # 합의(consensus) 조건: 기본적으로 4/5의 합의를 요구하나, 주 타임프레임 신호가 강하면 3/5라도 허용
+    # 합의(consensus) 조건 확인: 기본적으로 4/5 합의 또는 주 타임프레임 신호 기준
     if not (bullish_count >= 4 or bearish_count >= 4):
-        if primary_direction is None or not ((primary_direction == "bullish" and bullish_count >= 3) or (
-                primary_direction == "bearish" and bearish_count >= 3)):
-            print("No clear market signal. No trade recommended.")
+        if primary_direction is None or not ((primary_direction == "bullish" and bullish_count >= 3) or
+                                              (primary_direction == "bearish" and bearish_count >= 3)):
+            logging.info("명확한 시장 신호가 확인되지 않아 매매를 권장하지 않습니다.")
             return
 
-    # 시장 장세 결정: 기술적 데이터와 온체인 데이터를 모두 반영하여 bull, bear, neutral(중립) 판정
+    # 시장 장세 결정 (기술적 데이터와 온체인 데이터를 모두 반영)
     market_regime = determine_market_regime(multi_tf_data, onchain_data)  # "bull", "bear", "neutral"
     thresholds = adjust_indicator_thresholds(market_regime)
-    print(f"Market regime determined as: {market_regime}")
+    logging.info(f"시장 장세 판정 결과: {market_regime}")
 
     # GPT 프롬프트를 이용한 매매 결정 생성
     try:
         gpt_response = generate_trading_decision(wallet_balance, position_info, aggregated_data,
                                                  extended_data, onchain_data, multi_tf_data,
                                                  market_regime, thresholds)
-        print("Raw GPT Response:")
-        print(gpt_response)
+        logging.info("GPT 원시 응답:")
+        logging.info(gpt_response)
         decision = parse_trading_decision(gpt_response)
-        print("Parsed Decision:")
-        print(decision)
+        logging.info("파싱된 매매 결정:")
+        logging.info(decision)
         log_decision(decision, SYMBOL)
     except Exception as e:
-        print("Error generating/parsing GPT decision:", e)
+        logging.error(f"GPT 매매 결정 생성 및 파싱 중 오류 발생: {e}")
         return
 
-    # 포지션 관리: 위험/보상 비율이 2 이상이어야 하며, GO LONG 또는 GO SHORT 명령일 때만 포지션 진입
+    # GPT 응답 후 위험/보상 비율 계산 및 텔레그램 알림 전송 (매매 실행 여부와 관계없이)
     rr = compute_risk_reward(decision, current_price)
+    rr_text = f"{rr:.2f}" if rr is not None else "N/A"
+    alert_msg = (f"GPT 매매 결정 알림:\n"
+                 f"심볼: {SYMBOL}\n"
+                 f"최종 액션: {decision['final_action']}\n"
+                 f"위험/보상 비율: {rr_text}\n"
+                 f"상세: {decision['rationale']}")
+    send_telegram_message(alert_msg)
+
+    # 포지션 관리: 위험/보상 비율이 2 이상이어야 하며, GO LONG 또는 GO SHORT 명령일 때만 포지션 진입
     if not in_position:
         if rr is not None and rr >= 2 and decision["final_action"].upper() in ["GO LONG", "GO SHORT"]:
-            print(f"Opening new position: {decision['final_action']} at {current_price}")
+            logging.info(f"유리한 매매 설정 발견. 포지션 진입: {decision['final_action']} at {current_price}")
             log_open_position(SYMBOL, decision, current_price)
             in_position = True
             current_position_side = decision["final_action"].split()[-1]  # LONG 또는 SHORT
             current_position_entry_price = current_price
+
+            # 포지션 진입 시, long 또는 short 신호에 대해 텔레그램 메시지 전송
+            action = "매수" if decision["final_action"].upper() == "GO LONG" else "매도"
+            entry_msg = (f"{action} 진입 신호!\n심볼: {SYMBOL}\n진입가: {current_price}\n"
+                         f"상세: {decision['rationale']}")
+            send_telegram_message(entry_msg)
         else:
-            print("No favorable trade setup found based on risk/reward criteria.")
+            logging.info("위험/보상 비율 기준에 맞는 매매 설정을 찾지 못했습니다.")
     else:
         # 포지션이 열려 있는 경우, HOLD LONG/HOLD SHORT 외의 명령이면 청산
         if decision["final_action"].upper() not in ["HOLD LONG", "HOLD SHORT"]:
-            print(f"Closing position for {SYMBOL} at price {current_price}")
+            logging.info(f"{SYMBOL} 포지션 청산: 현재 가격 {current_price}")
             log_closed_position(SYMBOL, current_position_entry_price, current_price, current_position_side)
             in_position = False
         else:
-            print("Holding current position.")
-
+            logging.info("현재 포지션 유지 중.")
 
 if __name__ == "__main__":
     main()
