@@ -1,20 +1,19 @@
 import os
 import re
-import ta
 import csv
 import time
 import ccxt
 import requests
-
 import numpy as np
 import pandas as pd
 import undetected_chromedriver as uc  # 무료 데이터 크롤링을 위한 stealth driver
 
-from openai import OpenAI
+import ta
 from datetime import datetime
 from selenium.webdriver.common.by import By
 
 # Initialize GPT client (OPENAI_API_KEY must be set in your environment)
+from openai import OpenAI
 openai_api_key = os.environ['OPENAI_API_KEY']
 client = OpenAI(api_key=openai_api_key)
 
@@ -34,24 +33,16 @@ TIMEFRAMES = {
 ##############################################
 # 0. Persistent Driver Setup
 ##############################################
-# 전역 딕셔너리를 사용해 session_id별로 driver를 저장합니다.
 drivers = {}
-
 
 def create_driver():
     """새로운 undetected_chromedriver 인스턴스를 생성합니다."""
     options = uc.ChromeOptions()
-    # 필요한 옵션을 추가할 수 있습니다. 예: headless 모드 설정 등.
+    # 필요시 headless 옵션 등 추가 가능
     driver = uc.Chrome(options=options)
     return driver
 
-
 def get_driver(session_id='default_session'):
-    """
-    session_id를 기준으로 이미 생성된 드라이버가 있으면 재사용하고,
-    없으면 새 드라이버를 생성하여 반환합니다.
-    이 함수는 driver.quit()을 호출하지 않으므로, 브라우저는 계속 실행 상태를 유지합니다.
-    """
     global drivers
     if session_id in drivers and drivers[session_id] is not None:
         return drivers[session_id]
@@ -60,11 +51,9 @@ def get_driver(session_id='default_session'):
         drivers[session_id] = driver
         return driver
 
-
 ##############################################
 # 1. Data Collection & Technical Indicator Calculation
 ##############################################
-
 def fetch_ohlcv(symbol, timeframe, limit=300):
     """
     Fetch OHLCV data from Binance using ccxt and return as a pandas DataFrame.
@@ -80,12 +69,11 @@ def fetch_ohlcv(symbol, timeframe, limit=300):
     df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     return df
 
-
 def compute_technical_indicators(df):
     """
     Compute various technical indicators and append as new columns.
     Indicators include: RSI, SMA20, SMA50, SMA200, MACD, ATR, OBV, MFI, Bollinger Bands,
-    and moving average percentage differences.
+    moving average percentage differences, and ADX.
     """
     # Momentum and trend indicators
     df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
@@ -112,8 +100,11 @@ def compute_technical_indicators(df):
     df['ma50_diff'] = (df['close'] - df['sma50']) / df['sma50'] * 100
     df['ma200_diff'] = (df['close'] - df['sma200']) / df['sma200'] * 100
 
-    return df
+    # ADX (Average Directional Index) to measure trend strength
+    adx_indicator = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14)
+    df['adx'] = adx_indicator.adx()
 
+    return df
 
 def fetch_order_book(symbol):
     """
@@ -130,11 +121,9 @@ def fetch_order_book(symbol):
         bid = ask = spread = None
     return {"bid": bid, "ask": ask, "spread": spread}
 
-
 ##############################################
 # 1-2. Extended Data Collection via undetected_chromedriver (무료 크롤링)
 ##############################################
-
 def fetch_exchange_inflows():
     """
     무료 소스(예: CryptoQuant)에서 exchange inflow 및 outflow 데이터를 크롤링하여
@@ -170,7 +159,6 @@ def fetch_exchange_inflows():
         print(f"Error crawling net exchange inflows from CryptoQuant: {e}")
         return "N/A"
 
-
 def fetch_funding_rate(symbol):
     """
     기존 Binance Futures 데이터를 사용.
@@ -183,7 +171,6 @@ def fetch_funding_rate(symbol):
     except Exception as e:
         print(f"Error fetching funding rate for {symbol}: {e}")
         return "N/A"
-
 
 def fetch_open_interest(symbol):
     """
@@ -199,7 +186,6 @@ def fetch_open_interest(symbol):
         print(f"Error fetching open interest for {symbol}: {e}")
         return "N/A"
 
-
 def fetch_fear_and_greed_index():
     """
     Retrieve the current Fear & Greed Index from Alternative.me.
@@ -213,7 +199,6 @@ def fetch_fear_and_greed_index():
     except Exception as e:
         print(f"Error fetching Fear & Greed Index: {e}")
         return None, None
-
 
 def fetch_multi_tf_data(symbol, timeframes=None, limit=300):
     """
@@ -243,22 +228,24 @@ def fetch_multi_tf_data(symbol, timeframes=None, limit=300):
             "atr": round(latest['atr'], 2) if not np.isnan(latest['atr']) else None,
             "obv": round(latest['obv'], 2) if not np.isnan(latest['obv']) else None,
             "mfi": round(latest['mfi'], 2) if not np.isnan(latest['mfi']) else None,
+            "adx": round(latest['adx'], 2) if not np.isnan(latest['adx']) else None,
             "timestamp": latest['timestamp']
         }
     return multi_tf_data
 
-
 ##############################################
 # 2. Market Regime & Dynamic Indicator Thresholds
 ##############################################
-
 def determine_market_regime(multi_tf_data):
     """
-    단순 기준: 1시간봉 데이터를 기준으로 가격이 SMA200, SMA50 보다 높으면 bull,
-    둘 다 낮으면 bear, 아니면 sideways.
+    개선된 기준: 1시간봉의 데이터를 기준으로 ADX가 25 미만이면 횡보(또는 모호)로 판단.
+    ADX가 25 이상일 경우, 가격이 SMA200, SMA50보다 높으면 bull, 낮으면 bear.
     """
     data = multi_tf_data.get("1h")
     if data is None:
+        return "sideways"
+    adx = data.get("adx")
+    if adx is None or adx < 25:
         return "sideways"
     current_price = data["current_price"]
     sma200 = data["sma200"]
@@ -272,22 +259,21 @@ def determine_market_regime(multi_tf_data):
     else:
         return "sideways"
 
-
 def adjust_indicator_thresholds(market_regime):
     """
     시장 장세에 따라 RSI, MACD, MA 관련 기준을 동적으로 설정.
     """
     if market_regime == "bull":
         thresholds = {
-            "rsi_oversold": 45,  # bull 시장에서는 RSI 30 대신 45 정도에서 반등
-            "rsi_overbought": 80,  # 강세장에서 RSI가 70에 머무르므로 80으로 상향 조정
+            "rsi_oversold": 45,
+            "rsi_overbought": 80,
             "macd_comment": "Ignore minor bearish MACD crosses; wait for a deep pullback for entries.",
             "ma_comment": "Buy pullbacks when price touches the 50MA (acting as dynamic support)."
         }
     elif market_regime == "bear":
         thresholds = {
-            "rsi_oversold": 20,  # 약세장에서는 RSI가 더 낮은 값까지 내려감
-            "rsi_overbought": 55,  # 약세장에서 RSI 55 이상이면 단기 반등 가능
+            "rsi_oversold": 20,
+            "rsi_overbought": 55,
             "macd_comment": "Ignore minor bullish MACD crosses; wait for confirmation of momentum continuation.",
             "ma_comment": "Sell rallies when price touches the 50MA (acting as resistance)."
         }
@@ -300,18 +286,69 @@ def adjust_indicator_thresholds(market_regime):
         }
     return thresholds
 
+##############################################
+# 2-2. Additional Data Sources: OnChain, Options, Global Market
+##############################################
+def fetch_onchain_data():
+    """
+    Stub function for on-chain metrics.
+    실제 무료 API나 웹 크롤링을 통해 데이터를 가져올 수 있다면 수정.
+    """
+    return {
+        "active_addresses": "N/A",
+        "whale_movement": "N/A",
+        "network_fee": "N/A"
+    }
+
+def fetch_options_data():
+    """
+    Stub function for options market data.
+    """
+    return {
+        "put_call_ratio": "N/A",
+        "implied_volatility": "N/A",
+        "max_pain": "N/A"
+    }
+
+def fetch_global_market_data():
+    """
+    Stub function for global market data.
+    """
+    return {
+        "dollar_index": "N/A",
+        "equity_index": "N/A",
+        "vix": "N/A"
+    }
+
+def fetch_additional_data(symbol):
+    """
+    Merge basic additional data with extended market data.
+    """
+    base_data = fetch_order_book(symbol)
+    extended_data = {
+        "funding_rate": fetch_funding_rate(symbol),
+        "open_interest": fetch_open_interest(symbol),
+        "order_book_bid": base_data.get("bid", "N/A"),
+        "order_book_ask": base_data.get("ask", "N/A"),
+        "order_book_spread": base_data.get("spread", "N/A"),
+        "exchange_inflows": fetch_exchange_inflows(),
+        "fear_and_greed_index": fetch_fear_and_greed_index(),
+        "onchain_data": fetch_onchain_data(),
+        "options_data": fetch_options_data(),
+        "global_market_data": fetch_global_market_data()
+    }
+    return extended_data
 
 ##############################################
 # 3. GPT Prompt Generation & Trading Decision (동적 기준 포함)
 ##############################################
-
 def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended_data, multi_tf_data, market_regime,
                         thresholds):
     """
     Generate a detailed XML prompt in English for GPT.
-    XML 내에 동적 기준(시장 장세별 RSI, MACD, MA 기준)과 청산맵 정보를 포함.
+    XML 내에 동적 기준(시장 장세별 RSI, MACD, MA 기준), 다중 시간대 데이터(ADX 포함)와 추가 데이터들을 포함.
     """
-    # Create a multi-timeframe summary string
+    # Create a multi-timeframe summary string including ADX
     multi_tf_summary = ""
     for tf, data in multi_tf_data.items():
         multi_tf_summary += (
@@ -320,8 +357,13 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
             f"SMA200: {data['sma200']} (Diff: {data['ma200_diff']}%), "
             f"Bollinger Upper: {data['bb_upper']}, "
             f"MACD: {data['macd']} (Signal: {data['macd_signal']}), "
-            f"ATR: {data['atr']}, OBV: {data['obv']}, MFI: {data['mfi']}\n"
+            f"ATR: {data['atr']}, OBV: {data['obv']}, MFI: {data['mfi']}, ADX: {data['adx']}\n"
         )
+
+    # Extended data: unpack additional fields
+    onchain = extended_data.get('onchain_data', {})
+    options = extended_data.get('options_data', {})
+    global_market = extended_data.get('global_market_data', {})
 
     prompt = f"""
 <TradeBotPrompt>
@@ -344,6 +386,21 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
             </OrderBook>
             <ExchangeNetInflow>{extended_data.get('exchange_inflows', 'N/A')}</ExchangeNetInflow>
             <FearAndGreedIndex>{extended_data.get('fear_and_greed_index', 'N/A')}</FearAndGreedIndex>
+            <OnChainData>
+                <ActiveAddresses>{onchain.get('active_addresses', 'N/A')}</ActiveAddresses>
+                <WhaleMovement>{onchain.get('whale_movement', 'N/A')}</WhaleMovement>
+                <NetworkFee>{onchain.get('network_fee', 'N/A')}</NetworkFee>
+            </OnChainData>
+            <OptionsData>
+                <PutCallRatio>{options.get('put_call_ratio', 'N/A')}</PutCallRatio>
+                <ImpliedVolatility>{options.get('implied_volatility', 'N/A')}</ImpliedVolatility>
+                <MaxPain>{options.get('max_pain', 'N/A')}</MaxPain>
+            </OptionsData>
+            <GlobalMarketData>
+                <DollarIndex>{global_market.get('dollar_index', 'N/A')}</DollarIndex>
+                <EquityIndex>{global_market.get('equity_index', 'N/A')}</EquityIndex>
+                <VIX>{global_market.get('vix', 'N/A')}</VIX>
+            </GlobalMarketData>
         </AdditionalData>
     </MarketContext>
     <Indicators>
@@ -366,8 +423,8 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
             </SMA50>
             <SMA200>
                 <Guide>
-                    A significant premium (e.g. 23% or more) above the SMA200 may indicate an overextended market,
-                    suggesting caution. Conversely, prices below SMA200 typically indicate a bearish bias.
+                    A significant premium above the SMA200 may indicate an overextended market.
+                    Conversely, prices below SMA200 typically indicate a bearish bias.
                 </Guide>
             </SMA200>
         </MovingAverages>
@@ -409,7 +466,7 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
         </FundingRate>
         <OpenInterest>
             <Guide>
-                Record high or rapidly increasing open interest indicates high market leverage. Exercise caution as it may signal trend continuation.
+                Rising open interest can indicate high market leverage; exercise caution as it may signal trend continuation.
             </Guide>
         </OpenInterest>
         <ExchangeNetInflow>
@@ -419,7 +476,7 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
         </ExchangeNetInflow>
         <FearAndGreedIndex>
             <Guide>
-                Use the provided Fear & Greed Index value directly to gauge market sentiment. Cross-check with other indicators instead of relying solely on this value.
+                Use the provided Fear & Greed Index value directly to gauge market sentiment.
             </Guide>
         </FearAndGreedIndex>
     </Indicators>
@@ -456,7 +513,6 @@ def generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended
     """
     return prompt
 
-
 def generate_trading_decision(wallet_balance, position_info, aggregated_data, extended_data, multi_tf_data,
                               market_regime, thresholds):
     prompt = generate_gpt_prompt(wallet_balance, position_info, aggregated_data, extended_data, multi_tf_data,
@@ -474,7 +530,6 @@ def generate_trading_decision(wallet_balance, position_info, aggregated_data, ex
         ]
     )
     return response.choices[0].message.content
-
 
 def parse_trading_decision(response_text):
     """
@@ -497,50 +552,9 @@ def parse_trading_decision(response_text):
     }
     return decision
 
-
 ##############################################
-# 4. Position Logging Functions
+# 4. Position Logging & Risk Management Functions
 ##############################################
-
-def log_decision(decision, symbol):
-    file_exists = os.path.isfile(DECISIONS_LOG_FILE)
-    with open(DECISIONS_LOG_FILE, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["timestamp", "symbol", "final_action", "leverage", "trade_term", "tp_price", "sl_price",
-                             "limit_order_price", "rationale"])
-        writer.writerow([datetime.utcnow(), symbol, decision["final_action"], decision["leverage"],
-                         decision["trade_term"], decision["tp_price"], decision["sl_price"],
-                         decision["limit_order_price"], decision["rationale"]])
-
-
-def log_open_position(symbol, decision, entry_price):
-    file_exists = os.path.isfile(OPEN_POSITIONS_FILE)
-    with open(OPEN_POSITIONS_FILE, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(
-                ["timestamp", "symbol", "action", "entry_price", "leverage", "trade_term", "tp_price", "sl_price",
-                 "limit_order_price", "rationale"])
-        writer.writerow([datetime.utcnow(), symbol, decision["final_action"], entry_price, decision["leverage"],
-                         decision["trade_term"], decision["tp_price"], decision["sl_price"],
-                         decision["limit_order_price"], decision["rationale"]])
-
-
-def log_closed_position(symbol, entry_price, exit_price, trade_side):
-    profit = (exit_price - entry_price) if trade_side.upper() == "LONG" else (entry_price - exit_price)
-    file_exists = os.path.isfile(CLOSED_POSITIONS_FILE)
-    with open(CLOSED_POSITIONS_FILE, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        if not file_exists:
-            writer.writerow(["timestamp", "symbol", "trade_side", "entry_price", "exit_price", "profit"])
-        writer.writerow([datetime.utcnow(), symbol, trade_side, entry_price, exit_price, profit])
-
-
-##############################################
-# 5. Position Management & Main Trading Logic
-##############################################
-
 def compute_risk_reward(decision, entry_price):
     """
     Compute the risk/reward ratio based on absolute price levels.
@@ -565,27 +579,60 @@ def compute_risk_reward(decision, entry_price):
         print("Error computing risk-reward:", e)
         return None
 
-
-def fetch_additional_data(symbol):
+def compute_position_size(wallet_balance_str, risk_percentage, entry_price, stop_loss_price):
     """
-    Merge basic additional data with extended market data.
+    Calculate position size based on risk per trade.
+    wallet_balance_str: e.g. "1000 USDT"
+    risk_percentage: e.g. 0.02 for 2%
     """
-    base_data = fetch_order_book(symbol)
-    extended_data = {
-        "funding_rate": fetch_funding_rate(symbol),
-        "open_interest": fetch_open_interest(symbol),
-        "order_book_bid": base_data["bid"],
-        "order_book_ask": base_data["ask"],
-        "order_book_spread": base_data["spread"],
-        "exchange_inflows": fetch_exchange_inflows(),
-        "fear_and_greed_index": fetch_fear_and_greed_index(),
-    }
-    return extended_data
+    try:
+        balance = float(wallet_balance_str.split()[0])
+    except:
+        balance = 1000.0
+    risk_amount = balance * risk_percentage
+    risk_per_unit = abs(entry_price - stop_loss_price)
+    if risk_per_unit == 0:
+        return None
+    position_size = risk_amount / risk_per_unit
+    return position_size
 
+def log_decision(decision, symbol):
+    file_exists = os.path.isfile(DECISIONS_LOG_FILE)
+    with open(DECISIONS_LOG_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["timestamp", "symbol", "final_action", "leverage", "trade_term", "tp_price", "sl_price",
+                             "limit_order_price", "rationale"])
+        writer.writerow([datetime.utcnow(), symbol, decision["final_action"], decision["leverage"],
+                         decision["trade_term"], decision["tp_price"], decision["sl_price"],
+                         decision["limit_order_price"], decision["rationale"]])
 
+def log_open_position(symbol, decision, entry_price, position_size):
+    file_exists = os.path.isfile(OPEN_POSITIONS_FILE)
+    with open(OPEN_POSITIONS_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(
+                ["timestamp", "symbol", "action", "entry_price", "position_size", "leverage", "trade_term", "tp_price", "sl_price",
+                 "limit_order_price", "rationale"])
+        writer.writerow([datetime.utcnow(), symbol, decision["final_action"], entry_price, position_size, decision["leverage"],
+                         decision["trade_term"], decision["tp_price"], decision["sl_price"],
+                         decision["limit_order_price"], decision["rationale"]])
+
+def log_closed_position(symbol, entry_price, exit_price, trade_side):
+    profit = (exit_price - entry_price) if trade_side.upper() == "LONG" else (entry_price - exit_price)
+    file_exists = os.path.isfile(CLOSED_POSITIONS_FILE)
+    with open(CLOSED_POSITIONS_FILE, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow(["timestamp", "symbol", "trade_side", "entry_price", "exit_price", "profit"])
+        writer.writerow([datetime.utcnow(), symbol, trade_side, entry_price, exit_price, profit])
+
+##############################################
+# 5. Position Management & Main Trading Logic
+##############################################
 def main():
-    wallet_balance = "1000 USDT"
-    # Current position info: "NONE" initially.
+    wallet_balance = "1000 USDT"  # 초기 계좌 잔액
     position_info = "NONE"
     in_position = False
     current_position_side = None
@@ -600,10 +647,10 @@ def main():
     # Use 1h data as baseline for current price
     current_price = multi_tf_data["1h"]["current_price"]
 
-    # Fetch extended market data (includes crawled net inflow, high leverage ratio, and liquidation map info)
+    # Fetch extended market data (order book, funding rate, open interest, exchange inflows, fear & greed, on-chain, options, global data)
     extended_data = fetch_additional_data(SYMBOL)
 
-    # Determine aggregated trend based on whether current price is above SMA200 (for each timeframe)
+    # Determine aggregated trend based on whether current price is above SMA200 for each timeframe
     bullish_count = 0
     bearish_count = 0
     tf_directions = {}
@@ -627,6 +674,13 @@ def main():
     market_regime = determine_market_regime(multi_tf_data)  # "bull", "bear", or "sideways"
     thresholds = adjust_indicator_thresholds(market_regime)
 
+    # (Optional) 추가 필터: 모호한 시장(예: sideways)에서는 무거운 AI 호출 대신 단순 전략 적용 또는 거래 보류
+    if market_regime == "sideways":
+        print("Market regime is sideways. Consider using mean-reversion strategies or no trade.")
+        # 여기서 별도의 mean-reversion 로직 또는 GPT 호출 여부를 결정할 수 있음.
+        # 일단 본 예제에서는 거래를 중단합니다.
+        return
+
     # Generate GPT-based trading decision using the detailed XML prompt (with dynamic criteria)
     try:
         gpt_response = generate_trading_decision(wallet_balance, position_info, aggregated_data,
@@ -645,8 +699,20 @@ def main():
     rr = compute_risk_reward(decision, current_price)
     if not in_position:
         if rr is not None and rr >= 2 and decision["final_action"].upper() in ["GO LONG", "GO SHORT"]:
+            # Compute recommended position size using 2% risk per trade
+            try:
+                tp_price = float(decision["tp_price"])
+                sl_price = float(decision["sl_price"])
+            except Exception as e:
+                print("Error parsing TP/SL prices:", e)
+                return
+            position_size = compute_position_size(wallet_balance, 0.02, current_price, sl_price)
+            if position_size is None:
+                print("Failed to compute position size.")
+                return
             print(f"Opening new position: {decision['final_action']} at {current_price}")
-            log_open_position(SYMBOL, decision, current_price)
+            print(f"Recommended position size: {position_size:.6f} units (based on 2% risk)")
+            log_open_position(SYMBOL, decision, current_price, position_size)
             in_position = True
             current_position_side = decision["final_action"].split()[-1]  # "LONG" or "SHORT"
             current_position_entry_price = current_price
@@ -660,7 +726,6 @@ def main():
             in_position = False
         else:
             print("Holding current position.")
-
 
 if __name__ == "__main__":
     main()
