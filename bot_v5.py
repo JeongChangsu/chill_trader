@@ -890,11 +890,13 @@ def main():
         alert_msg = (f"{action} signal!\n"
                      f"Symbol: {SYMBOL}\n"
                      f"Entry Price: {current_price}\n"
+                     f"Leverage: {decision['leverage']}\n"
                      f"Risk/Reward Ratio: {rr_text}\n"
                      f"Trade Term: {decision['trade_term']}\n"
                      f"Limit Order Price: {decision['limit_order_price']}\n"
                      f"TP: {decision['tp_price']}, SL: {decision['sl_price']}\n"
                      f"Rationale: {decision['rationale']}")
+
         send_telegram_message(alert_msg)
     else:
         logging.info("No position open signal; Telegram alert not sent.")
