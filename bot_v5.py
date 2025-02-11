@@ -1,17 +1,20 @@
 import os
 import re
+import ta
 import csv
 import time
 import ccxt
+import base64
+import logging
 import requests
+
 import numpy as np
 import pandas as pd
-import ta
 import undetected_chromedriver as uc  # Free data crawling using a stealth driver
-import logging
+
+from openai import OpenAI
 from datetime import datetime
 from selenium.webdriver.common.by import By
-from openai import OpenAI
 
 # ===========================================
 # Logging configuration (logs in Korean for overall system messages)
@@ -260,7 +263,6 @@ def fetch_onchain_data(symbol):
         sopr_text = driver.find_element(By.XPATH, '//span[contains(@class, "priceWrapper")]/span').text
         sopr = float(sopr_text.replace(",", ""))
 
-        driver.quit()
         logging.info("On-chain data (MVRV, SOPR) fetched successfully")
         return {"mvrv": mvrv, "sopr": sopr}
     except Exception as e:
@@ -310,57 +312,91 @@ def fetch_liquidation_heatmap():
     In production, parse the data from a source such as https://coinank.com/liqHeatMapChart.
     Here we return dummy data for illustration.
     """
+    url = "https://coinank.com/liqHeatMapChart"  # Example URL
     try:
-        heatmap_data = {
-            "long_liq_zone": "28500-29000",
-            "short_liq_zone": "31500",
-            "description": "Concentrated long liquidations between 28500-29000 and short liquidations around 31500."
-        }
+        driver = get_driver()
+        driver.get(url)
+        time.sleep(3)
+
+        if driver.find_element(By.XPATH, '//span[@class="anticon anticon-camera"]').is_displayed():
+            driver.find_element(By.XPATH, '//span[@class="anticon anticon-camera"]').click()
+            time.sleep(2)
+
+            driver.quit()
+
         logging.info("Liquidation heatmap data fetched successfully")
-        return heatmap_data
     except Exception as e:
         logging.error(f"Error fetching liquidation heatmap data: {e}")
-        return {}
 
 
-def analyze_liquidation_heatmap(heatmap_data):
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
+
+
+def analyze_liquidation_heatmap():
     """
-    Use GPT-4o to analyze the provided liquidation heatmap data.
-    The prompt instructs GPT to output the analysis in the following format:
-    Output Format:
+    Analyze the liquidation heatmap using a downloaded image.
+    The image file path is '/Users/changpt/Downloads/Liquidation Heat Map.png'.
+    After sending the image to GPT-4o and receiving the output, delete the image file.
+
+    GPT-4o is instructed to output the analysis in a single line using the following format:
     "Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>."
     """
-    prompt = f"""
-Please analyze the following liquidation heatmap data for BTC futures.
-The heatmap data is provided as follows:
-- Long Liquidation Zone: {heatmap_data.get('long_liq_zone', 'N/A')}
-- Short Liquidation Zone: {heatmap_data.get('short_liq_zone', 'N/A')}
-- Description: {heatmap_data.get('description', 'N/A')}
+    image_path = "/Users/changpt/Downloads/Liquidation Heat Map.png"
 
-Based on this data, please:
-1. Identify the key liquidation zones.
-2. Explain the potential impact of these zones on future price movement.
-3. Determine which side (longs or shorts) is more at risk.
-Output your analysis in a single line following exactly this format:
-"Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>."
-"""
-    developer_prompt = "You are a specialized analyst in crypto liquidations."
+    # Encode the image to base64
+    try:
+        base64_image = encode_image(image_path)
+    except Exception as e:
+        logging.error("Error encoding image: " + str(e))
+        return "N/A"
+
+    # Prepare the messages for GPT-4o:
+    system_message = "You are a specialized analyst in crypto liquidations."
+    user_message = [
+        {
+            "type": "text",
+            "text": (
+                "Please analyze the attached liquidation heatmap image for BTC futures. "
+                "Identify the key liquidation zones, explain their potential impact on future price movements, "
+                "and indicate which side (longs or shorts) is at higher risk. "
+                "Output your analysis in a single line using the following format: "
+                "\"Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>.\""
+            )
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{base64_image}"
+            }
+        }
+    ]
+
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # Adjust model if needed
-            reasoning_effort="high",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "developer", "content": developer_prompt},
-                {"role": "user", "content": prompt}
-            ]
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
+            ],
+            temperature=0.0,
         )
-        heatmap_analysis = response.choices[0].message.content
-        logging.info("Liquidation heatmap analysis result:")
-        logging.info(heatmap_analysis)
-        return heatmap_analysis
+        analysis_result = response.choices[0].message.content
     except Exception as e:
-        logging.error("Error during liquidation heatmap analysis: " + str(e))
-        return "N/A"
+        logging.error("Error during GPT analysis of liquidation heatmap: " + str(e))
+        analysis_result = "N/A"
+
+    # Delete the image file after processing
+    try:
+        os.remove(image_path)
+        logging.info("Deleted the liquidation heatmap image file after processing.")
+    except Exception as e:
+        logging.error("Error deleting the image file: " + str(e))
+
+    logging.info("Liquidation heatmap analysis result:")
+    logging.info(analysis_result)
+    return analysis_result
 
 
 # ===========================================
@@ -794,8 +830,8 @@ def main():
     extended_data, onchain_data = fetch_additional_data(SYMBOL)
 
     # Liquidation heatmap: fetch and analyze via GPT-4o
-    heatmap_data = fetch_liquidation_heatmap()
-    heatmap_analysis = analyze_liquidation_heatmap(heatmap_data)
+    fetch_liquidation_heatmap()
+    heatmap_analysis = analyze_liquidation_heatmap()
 
     # Count bullish/bearish signals across timeframes (using SMA200 as reference)
     bullish_count = 0
