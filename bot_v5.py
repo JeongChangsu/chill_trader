@@ -12,8 +12,11 @@ import numpy as np
 import pandas as pd
 import undetected_chromedriver as uc  # Free data crawling using a stealth driver
 
+from PIL import Image
+from google import genai
 from openai import OpenAI
 from datetime import datetime
+from google.genai import types
 from selenium.webdriver.common.by import By
 
 # ===========================================
@@ -42,7 +45,11 @@ TIMEFRAMES = {
 
 # OPENAI_API_KEY must be set in the environment
 openai_api_key = os.environ.get('OPENAI_API_KEY')
-client = OpenAI(api_key=openai_api_key)
+gpt_client = OpenAI(api_key=openai_api_key)
+
+# GOOGLE_API_KEY must be set in the environment
+google_api_key = os.environ.get('GOOGLE_API_KEY')
+gemini_client = genai.Client(api_key=google_api_key)
 
 # Telegram variables (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in environment)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -344,45 +351,20 @@ def analyze_liquidation_heatmap():
     "Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>."
     """
     image_path = "/Users/changpt/Downloads/Liquidation Heat Map.png"
-
-    # Encode the image to base64
-    try:
-        base64_image = encode_image(image_path)
-    except Exception as e:
-        logging.error("Error encoding image: " + str(e))
-        return "N/A"
-
-    # Prepare the messages for GPT-4o:
-    system_message = "You are a specialized analyst in crypto liquidations."
-    user_message = [
-        {
-            "type": "text",
-            "text": (
-                "Please analyze the attached liquidation heatmap image for BTC futures. "
-                "Identify the key liquidation zones, explain their potential impact on future price movements, "
-                "and indicate which side (longs or shorts) is at higher risk. "
-                "Output your analysis in a single line using the following format: "
-                "\"Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>.\""
-            )
-        },
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{base64_image}"
-            }
-        }
-    ]
+    image = Image.open(image_path)
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ],
-            temperature=0.0,
-        )
-        analysis_result = response.choices[0].message.content
+        sys_instruct = "You are a specialized analyst in crypto liquidations."
+        response = gemini_client.models.generate_content(
+            model="gemini-2.0-flash",
+            config=types.GenerateContentConfig(system_instruction=sys_instruct),
+            contents=["Please analyze the attached liquidation heatmap image for BTC futures. "
+                      "Identify the key liquidation zones, explain their potential impact on future price movements, "
+                      "and indicate which side (longs or shorts) is at higher risk. "
+                      "Output your analysis in a single line using the following format: "
+                      "\"Long Liquidation Zone: <value>; Short Liquidation Zone: <value>; Impact: <analysis text>; Risk: <which side is at higher risk>.\"",
+                      image])
+        analysis_result = response.text
     except Exception as e:
         logging.error("Error during GPT analysis of liquidation heatmap: " + str(e))
         analysis_result = "N/A"
@@ -681,7 +663,7 @@ def generate_trading_decision(wallet_balance, position_info, aggregated_data, ex
         "as defined in the provided XML. Do not deviate from the specified output format. "
         "Based on market regime and all provided data including liquidation heatmap analysis, adopt either a trend-following or mean reversion strategy accordingly."
     )
-    response = client.chat.completions.create(
+    response = gpt_client.chat.completions.create(
         model="o3-mini",
         reasoning_effort="high",
         messages=[
@@ -889,7 +871,6 @@ def main():
         action = "BUY" if decision["final_action"].upper() == "GO LONG" else "SELL"
         alert_msg = (f"{action} signal!\n"
                      f"Symbol: {SYMBOL}\n"
-                     f"Entry Price: {current_price}\n"
                      f"Leverage: {decision['leverage']}\n"
                      f"Risk/Reward Ratio: {rr_text}\n"
                      f"Trade Term: {decision['trade_term']}\n"
