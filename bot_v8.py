@@ -983,10 +983,10 @@ def compute_risk_reward(decision, entry_price, atr_value, thresholds):
             reward = entry_price - tp_price
             risk = sl_price - entry_price
         else:
-            return None
+            return None, None, None  # GO LONG, GO SHORT 아니면 None 반환
 
         if risk <= 0:
-            return None
+            return None, None, None
 
         rr_ratio = reward / risk
         tp_price_str = f"{tp_price:.2f}"  # format to 2 decimal places
@@ -1420,10 +1420,13 @@ def main():
     rr_ratio, tp_price_str, sl_price_str = compute_risk_reward(decision, cprice, atr_value_1h,
                                                                thresholds)  # thresholds 전달
 
-    if rr_ratio:
+    if rr_ratio is not None:  # compute_risk_reward 에서 반환값 None 체크
         decision["rr_ratio"] = f"{rr_ratio:.2f}"  # Risk-Reward Ratio decision 딕셔너리에 추가
         decision["tp_price"] = tp_price_str  # TP, SL 가격 decision 딕셔너리에 업데이트 (string)
         decision["sl_price"] = sl_price_str
+    else:  # rr_ratio가 None이면 (계산 실패)
+        logging.error("Failed to compute risk/reward. Skipping trade.")
+        return  # 거래 중단
 
     rr_text = decision.get("rr_ratio", "N/A")  # decision 딕셔너리에서 R/R ratio text 가져오기
 
