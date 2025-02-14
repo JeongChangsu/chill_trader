@@ -1,4 +1,4 @@
-# bot_v8.py
+# chill_trading_bot.py
 import os
 import re
 import ta
@@ -357,6 +357,7 @@ def calculate_donchian_channel(df, window=20):
     """
     df['donchian_upper'] = df['high'].rolling(window=window).max()
     df['donchian_lower'] = df['low'].rolling(window=window).min()
+    df['donchian_middle'] = (df['donchian_upper'] + df['donchian_lower']) / 2  # 중간값 계산
     return df
 
 
@@ -392,6 +393,7 @@ def fetch_multi_tf_data(symbol, timeframes=None, limit=300, thresholds=None):
             "macd": round(latest['macd'], 2) if not np.isnan(latest['macd']) else None,
             "donchian_upper": round(latest['donchian_upper'], 2),
             "donchian_lower": round(latest['donchian_lower'], 2),
+            "donchian_middle": round(latest['donchian_middle'], 2),  # 중간값 추가
             "macd_signal": round(latest['macd_signal'], 2) if not np.isnan(latest['macd_signal']) else None,
             "atr": round(latest['atr'], 2) if not np.isnan(latest['atr']) else None,
             "volume_change": round(latest['volume_change'], 2) if not np.isnan(latest['volume_change']) else None,
@@ -745,19 +747,13 @@ def generate_gemini_prompt(wallet_balance, position_info, extended_data,
     Gemini Pro 모델에 전달할 Prompt 생성. XML 대신 텍스트 기반, 상세 가이드 및 우선순위 명시.
     """
 
-    # Multi-timeframe 분석 요약
+    # Multi-Timeframe Analysis Summary (간결하게 유지)
     tf_summary_lines = []
     for tf, data in multi_tf_data.items():
         tf_summary_lines.append(
-            f"**{tf} Timeframe Analysis:**\n"
-            f"- Price: {data['current_price']:.2f}, RSI: {data['rsi']:.2f}\n"
-            f"- EMA20: {data['ema20']:.2f}, EMA50: {data['ema50']:.2f} (Diff: {data['ema50_diff']:.2f}%), EMA200: {data['ema200']:.2f} (Diff: {data['ema200_diff']:.2f}%)\n"
-            f"- Bollinger Bands (Upper): {data['bb_upper']:.2f}\n"
-            f"- MACD: {data['macd']:.2f} (Signal: {data['macd_signal']:.2f})\n"
-            f"- ATR: {data['atr']:.2f}, Volume Change: {data['volume_change']:.2f}%, Volume Oscillator: {data['volume_oscillator']:.2f}\n"  # Volume Oscillator 추가
-            f"- Donchian Channel (Upper): {data['donchian_upper']:.2f}, (Lower): {data['donchian_lower']:.2f}\n"
-            f"- Volume Divergence: Bearish={data['bearish_divergence']}, Bullish={data['bullish_divergence']}\n"
-            f"- Candle Patterns: Engulfing Bullish={data['engulfing_bullish']}, Engulfing Bearish={data['engulfing_bearish']}, Morning Star={data['morning_star']}, Evening Star={data['evening_star']}, Hammer={data['hammer']}, Hanging Man={data['hanging_man']}, Doji={data['doji']}\n"
+            f"**{tf}:** Price: {data['current_price']:.2f}, RSI: {data['rsi']:.2f}, "
+            f"EMA50 Diff: {data['ema50_diff']:.2f}%, Donchian: ({data['donchian_lower']:.2f}-{data['donchian_middle']:.2f}-{data['donchian_upper']:.2f})"
+            # middle 추가
         )
     multi_tf_summary = "\n".join(tf_summary_lines)
 
@@ -765,93 +761,62 @@ def generate_gemini_prompt(wallet_balance, position_info, extended_data,
     order_book_data = extended_data.get('order_book', {})
 
     prompt_text = f"""
-Your goal is to make optimal trading decisions based on a comprehensive analysis of market data.
-
-**Current Trading Session (KST):** **{current_session}**
+**Objective:** Make optimal trading decisions for BTC/USDT based on the provided market data.
 
 **Account Status:**
-- Wallet Balance: {wallet_balance}
-- Current Position: {position_info}
+- Balance: {wallet_balance} USDT
+- Position: {position_info}
 
 **Market Context:**
-- Market Regime: **{market_regime.upper()}**
-- Primary Timeframe for Decision: **{primary_tf}**
+- Regime: **{market_regime.upper()}**
+- Primary Timeframe: **{primary_tf}**
+- Session (KST): **{current_session}**
+- Confidence: {get_timeframe_agreement(multi_tf_data, market_regime)['confidence_level']}
 
-**Multi-Timeframe Technical Analysis Summary:**
+**Technical Analysis Summary:**
 {multi_tf_summary}
 
 **Additional Market Data:**
 - Funding Rate: {extended_data.get('funding_rate', 'N/A')}
 - Open Interest: {extended_data.get('open_interest', 'N/A')}
 - Order Book: Bid={order_book_data.get('bid', 'N/A')}, Ask={order_book_data.get('ask', 'N/A')}, Spread={order_book_data.get('spread', 'N/A')}
-- Exchange Net Inflow: {extended_data.get('exchange_inflows', 'N/A')}
-- Fear and Greed Index: Classification={fng_class}, Value={fng_value}
-- On-Chain Data: MVRV={onchain_data.get('mvrv', 'N/A')}, SOPR={onchain_data.get('sopr', 'N/A')}
-- Liquidation Heatmap Analysis: {heatmap_analysis}
-- Economic Calendar Events: {econ_summary}
-- Spot-Future Price Diff: {extended_data.get('spot_future_price_diff', 'N/A')}%
+- Exchange Inflow: {extended_data.get('exchange_inflows', 'N/A')}
+- Fear & Greed: {fng_class} ({fng_value})
+- On-Chain: MVRV={onchain_data.get('mvrv', 'N/A')}, SOPR={onchain_data.get('sopr', 'N/A')}
+- Liquidation Heatmap: {heatmap_analysis}
+- Economic Events: {econ_summary}
+- Spot-Future Diff: {extended_data.get('spot_future_price_diff', 'N/A')}%
 - Bitcoin Dominance: {extended_data.get('bitcoin_dominance', 'N/A')}%
 - Fake Breakout: {fake_breakout_info}
 - Session Volatility: {session_volatility_info}
 
-**Indicator Guidelines & Priorities:**
+**Indicator Guidelines:**
 
-1. **RSI (Priority: High):**
-    - Oversold: <={thresholds.get('rsi_oversold', 30)}, Overbought: >={thresholds.get('rsi_overbought', 70)}.
-    - In trend regimes (bull/bear): Use RSI to confirm momentum and identify potential continuation or pullback entries. RSI Trend Follow Level: {thresholds.get('rsi_trend_follow', 50)}.
-    - In sideways regimes: Use RSI for reversal signals at extremes. RSI Reversal Level: {thresholds.get('rsi_reversal', 45)}.
-
-2. **EMA (Priority: High):**
-    - EMA20, EMA50, EMA200: Analyze price position relative to EMAs for trend direction.
-    - EMA50 & EMA200 Crossovers: Confirm trend shifts.
-    - EMA50 Correction/Bounce: In bull/bear trends, look for price corrections to EMA50 as entry points. Correction Percent: ±{thresholds.get('ema50_correction_percent', 1.5)}%. Bounce Percent (Bear): ±{thresholds.get('ema50_bounce_percent', 1.5)}%.
-
-3. **MACD (Priority: Medium):**
-    - Signal Line Crossovers: Use for potential entry/exit signals, especially in sideways or early trend regimes. Lookback period for signal cross confirmation: {thresholds.get('macd_signal_cross_lookback', 3)} candles.
-    - Histogram Divergence: In sideways regimes, histogram divergence from price action can signal reversals. Lookback period for histogram divergence: {thresholds.get('macd_histogram_divergence_lookback', 5)} candles.
-
-4. **Bollinger Bands (Priority: Medium):**
-    - Band Expansion/Contraction: Assess volatility.
-    - Band Bounce: In sideways markets, bounces off Bollinger Bands can signal mean reversion opportunities. Band Bounce Percent: ±{thresholds.get('bb_band_bounce_percent', 0.8)}%.
-    - Band Walk: In trending markets, price "walking" along the upper/lower band indicates strong trend continuation.
-
-5. **Donchian Channel (Priority: Medium, especially in Sideways regimes):**
-    - Use Donchian Channel to identify potential support and resistance levels, especially in sideways markets.
-    - Consider buying near the lower Donchian Channel and selling near the upper Donchian Channel in range-bound conditions.
-
-6. **Candle Patterns (Priority: Low-Medium):**
-    - Engulfing, Morning/Evening Star, Hammer/Hanging Man, Doji: Use as supplementary confirmation at key levels (support/resistance, EMA levels).
-
-7. **Volume Analysis (Priority: Medium):**
-    - Volume Surge: Confirm breakouts or breakdowns. Significant volume increase on price movement adds conviction.
-    - Volume Divergence: Bearish divergence (price up, volume down) warns of uptrend weakness; bullish divergence (price down, volume down) suggests downtrend weakening.
-
-8. **ATR (Priority: High for Risk Management):**
-    - Volatility Assessment: ATR/Price ratio > 0.02 indicates high volatility, adjust leverage and stop-loss accordingly.
-    - Stop Loss & Take Profit: Use ATR multipliers for dynamic stop-loss and take-profit levels. Stop Loss Multiplier: {thresholds.get('atr_stop_loss_multiplier', 1.5)}, Take Profit Multiplier: {thresholds.get('atr_take_profit_multiplier', 2.0)}.
-
-9. **Order Book (Priority: Low):**
-    - Bid/Ask Spread: Monitor spread for liquidity assessment. Wider spread in high volatility, tighter in normal conditions.
-
-10. **On-Chain Data & Fear/Greed (Priority: Low-Medium for broad market context):**
-    - MVRV & SOPR: Assess overall market valuation and sentiment. Extreme undervaluation (MVRV<1, SOPR<1) may suggest sideways or accumulation phases.
-    - Fear & Greed Index: Sentiment context. Extreme fear/greed can be contrarian indicators.
-
-11. **Economic Calendar (Priority: Low-Medium for short-term volatility spikes):**
-    - High Impact Events: Be aware of major economic announcements that can cause volatility spikes. Consider tightening stops or reducing leverage before major events.
+| Indicator         | Priority | Bull Trend                                                                                                                                                                                             | Bear Trend                                                                                                                                                                                             | Sideways (Tight)                                                                                                                                        | Sideways (Wide)                                                                                                                                          |
+|-------------------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| RSI               | High     | Oversold: <={thresholds.get('rsi_oversold', 30)}, Overbought: >={thresholds.get('rsi_overbought', 70)}, Use RSI to confirm momentum and identify potential continuation or pullback entries. Trend Follow: {thresholds.get('rsi_trend_follow', 50)}. | Oversold: <={thresholds.get('rsi_oversold', 30)}, Overbought: >={thresholds.get('rsi_overbought', 70)}, Use RSI to confirm momentum and identify potential continuation or pullback entries. Trend Follow: {thresholds.get('rsi_trend_follow', 50)}. | Oversold: <={thresholds.get('rsi_oversold', 25)}, Overbought: >={thresholds.get('rsi_overbought', 75)}, Use RSI for reversal signals at extremes. Reversal: {thresholds.get('rsi_reversal', 40)}. | Oversold: <={thresholds.get('rsi_oversold', 35)}, Overbought: >={thresholds.get('rsi_overbought', 65)}, Use RSI for reversal signals at extremes. Reversal: {thresholds.get('rsi_reversal', 45)}. |
+| EMA (50, 200)    | High     | Price above both EMA50 and EMA200 indicates a bullish trend. Look for pullbacks to the EMA50 as potential buying opportunities. A Golden Cross (EMA50 crossing above EMA200) confirms a bullish trend.   | Price below both EMA50 and EMA200 indicates a bearish trend. Look for rallies to the EMA50 as potential selling opportunities. A Dead Cross (EMA50 crossing below EMA200) confirms a bearish trend.   | Price oscillating around EMA50 indicates sideways movement. Frequent EMA crossovers may occur.                                                                 | Price oscillating around EMA50 indicates sideways movement. Frequent EMA crossovers may occur.                                                                 |
+| MACD              | Medium   | Use signal line crossovers for potential entry/exit signals, particularly in early trend stages.                                                                                                    | Use signal line crossovers for potential entry/exit signals, particularly in early trend stages.                                                                                                    | Use histogram divergence from price action to signal potential reversals. Lookback period for histogram divergence: {thresholds.get('macd_histogram_divergence_lookback', 5)} candles.          | Use histogram divergence from price action to signal potential reversals. Lookback period for histogram divergence: {thresholds.get('macd_histogram_divergence_lookback', 7)} candles.         |
+| Bollinger Bands   | Medium   | In strong trends, price may "walk" along the upper (bullish) or lower (bearish) band.                                                                                                                 | In strong trends, price may "walk" along the upper (bullish) or lower (bearish) band.                                                                                                                 | Bounces off Bollinger Bands can signal mean reversion opportunities. Look for price to revert to the mean (middle band) after touching the upper or lower band. Band Bounce Percent: ±{thresholds.get('bb_band_bounce_percent', 0.5)}%. | Bounces off Bollinger Bands can signal mean reversion opportunities.  Band Bounce Percent: ±{thresholds.get('bb_band_bounce_percent', 1.2)}%.       |
+| Donchian Channel  | High     | N/A                                                                                                                                                                                                    | N/A                                                                                                                                                                                                    | **Primary indicator for sideways markets.** Buy near the lower channel, sell near the upper channel.                                                       | **Primary indicator for sideways markets.** Buy near the lower channel, sell near the upper channel.                                                        |
+| Volume            | Medium   | Increasing volume confirms breakouts in the direction of the trend.                                                                                                                                 | Increasing volume confirms breakdowns in the direction of the trend.                                                                                                                                | Look for divergences between price and volume. Price rising with decreasing volume (bearish divergence) may indicate a weakening uptrend.                  | Look for divergences between price and volume. Price falling with decreasing volume (bullish divergence) may indicate a weakening downtrend.                 |
+| ATR               | High     | Use ATR to assess volatility and adjust leverage/stop-loss accordingly. Higher ATR suggests higher volatility.                                                                                    | Use ATR to assess volatility and adjust leverage/stop-loss accordingly. Higher ATR suggests higher volatility.                                                                                    | Use ATR to gauge the width of the trading range.                                                                                                           | Use ATR to gauge the width of the trading range.                                                                                                           |
 
 **Session Strategies (KST):**
 
-*   **OVERNIGHT (00:00-08:00):** Low liquidity. Watch for fake breakouts. *Consider tighter stops*.
+*   **OVERNIGHT (00:00-08:00):** Low liquidity. *Prioritize risk management*. Watch for fake breakouts. Use tighter stops, lower leverage.
 *   **ASIAN (08:00-16:00):** Medium volatility.
-    *   08:00-09:00: Potential volatility. Look for strong moves with volume.
-    *   After 09:00: If trend, follow with EMAs, RSI (1h/4h). If sideways, use Bollinger Bands, Donchian (15m/1h).
+    *   08:00-09:00: Potential volatility spike. Look for strong directional moves *with increasing volume*.
+    *   After 09:00:
+        *   If a clear trend develops: Follow the trend using EMAs, RSI, and price action on 1h/4h timeframes.
+        *   If sideways/range-bound: Employ mean reversion strategies using Bollinger Bands, Donchian Channel, and RSI on 15m/1h timeframes. Look for reversals at key levels.
 *   **LONDON (16:00-22:00):** High liquidity.
-    *   16:00 Open: Expect volatility and potential breakouts.
-    *   Trade the identified trend after the open.
-*   **US (22:00-06:00):** Highest volume/volatility. Follow London trend, but watch for reversals.
-    *   22:30-23:30: Economic news releases. *Avoid entries at release, wait for confirmation.*
-*   **TRANSITION (06:00-08:00):** Cautious trading. Possible trend establishment before Asian open.
+    *   16:00 Open: Expect high volatility and potential breakouts/breakdowns.
+    *   After the initial volatility, identify and trade the dominant trend. Use 1h/4h timeframes.
+*   **US (22:00-06:00):** Highest volume and volatility.
+    *   Often follows the London session trend, but *be prepared for reversals*, especially around key support/resistance levels.
+    *   22:30-23:30: Economic news releases. *Avoid new entries immediately before/after major news releases. Wait for the market to digest the news and establish a clear direction.*
+*   **TRANSITION (06:00-08:00):** Cautious trading. Low liquidity, potential trend formation before the Asian open.
 
 **Regime-Specific Strategy Guidelines (within Sessions):**
 
@@ -886,9 +851,9 @@ Your goal is to make optimal trading decisions based on a comprehensive analysis
         - Bollinger Band bounces (±{thresholds.get('bb_band_bounce_percent', 0.8)}% from bands). (Optional)
         - Order Book Imbalance suggests potential reversal (if available). (Optional)
     - Exit/Take Profit:
-        - Donchian Channel Middle.  <-- Donchian 중간값 명시
+        - Donchian Channel Middle.
         - Opposite Donchian Channel boundary.
-        - Bollinger Band Middle Band (EMA20). (Optional)
+        - Bollinger Band Middle Band (EMA20).
     - Stop Loss:
         - Beyond Donchian Channel boundaries
     - **Important Note:** In a sideways regime, *prioritize entries near the Donchian Channel boundaries*.  Look for *quick reversals* (scalping) or *short-term mean reversion*.
@@ -990,13 +955,19 @@ def generate_trading_decision(wallet_balance, position_info, extended_data,
     return response.text
 
 
+def escape_markdown_v2(text):
+    """
+    Telegram Markdown V2에서 문제가 될 수 있는 모든 특수 문자를 이스케이프 처리.
+    """
+    escape_chars = r"[_*\[\]()~`>#\+\-=|{}\.!]"
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\1", text)
+
+
 def parse_trading_decision(response_text):
     """
-    Gemini 응답 텍스트를 파싱하여 거래 결정 dict 형태로 반환.
-    정규 표현식(regex)을 사용하여 더 robust하게 파싱.
-    **Always returns a dictionary, even if parsing fails.**
+    Gemini 응답 텍스트를 파싱하여 거래 결정 dict 형태로 반환.  (텔레그램 메시지 전송 로직 없음)
     """
-    decision = {  # Initialize decision dictionary with default values
+    decision = {
         "final_action": "NO TRADE",
         "leverage": "1x",
         "trade_term": "N/A",
@@ -1006,33 +977,22 @@ def parse_trading_decision(response_text):
         "rationale": "N/A"
     }
 
-    if not response_text:  # Handle empty or None response_text explicitly
-        logging.warning("parse_trading_decision received empty response_text. Returning default NO TRADE decision.")
-        return decision  # Return default decision dict if response is empty
+    if not response_text:
+        logging.warning("parse_trading_decision received empty response_text.")
+        return decision
 
     try:
-        lines = response_text.strip().split('\n')
-        first_line = lines[0] if lines else ""
-
-        action_match = re.search(r"(GO LONG|GO SHORT|HOLD LONG|HOLD SHORT|NO TRADE)", first_line, re.IGNORECASE)
-        if action_match:
-            decision["final_action"] = action_match.group(1).upper()
-
-        parts = response_text.split(',')
-        if len(parts) >= 6:  # 쉼표로 분리된 값들 파싱 (예외 처리 강화)
-            try:
-                decision["leverage"] = parts[1].strip().replace("x", "").strip()
-                decision["trade_term"] = parts[2].strip()
-                decision["tp_price"] = parts[3].strip()
-                decision["sl_price"] = parts[4].strip()
-                decision["limit_order_price"] = parts[5].strip()
-                decision["rationale"] = ", ".join([p.strip() for p in parts[6:]]) if len(
-                    parts) > 6 else "N/A"  # Rationale
-            except Exception as parse_err:
-                logging.error(f"Error parsing decision details: {parse_err}")
-                decision["rationale"] = response_text  # Raw response 전체를 rationale로 저장
-        else:
-            decision["rationale"] = response_text  # 쉼표 분리 실패 시, raw response 전체를 rationale로
+        match = re.search(r"GO (LONG|SHORT).*?,(.*?)x, *(.*?), *(.*?), *(.*?), *(.*?), *(.*)", response_text,
+                          re.DOTALL | re.IGNORECASE)
+        if match:
+            decision["final_action"] = f"GO {match.group(1).upper()}"
+            decision["leverage"] = match.group(2).strip()
+            decision["trade_term"] = match.group(3).strip()
+            decision["tp_price"] = match.group(4).strip()
+            decision["sl_price"] = match.group(5).strip()
+            decision["limit_order_price"] = match.group(6).strip()
+            # Rationale에서 마지막 \n``` 제거 (이스케이프는 main에서)
+            decision["rationale"] = match.group(7).strip().replace("\n```", "")
 
     except Exception as e:
         logging.error(f"Error parsing Gemini response: {e}")
@@ -1040,7 +1000,8 @@ def parse_trading_decision(response_text):
 
     logging.info("Parsed Trading Decision:")
     logging.info(decision)
-    return decision  # Always return the decision dictionary
+
+    return decision
 
 
 # =====================================================
@@ -1099,9 +1060,10 @@ def log_closed_position(symbol, entry_price, exit_price, trade_side):
 def compute_risk_reward(decision, entry_price, atr_value, thresholds, market_regime, donchian_upper, donchian_lower):
     """
     ATR 기반 또는 횡보장 박스권(Donchian Channel) 기반 Stop Loss와 Take Profit 사용하여 Risk/Reward Ratio 계산.
+    -> 이제는 Gemini가 제안한 TP/SL 값이 유효한지 검증하는 역할.
 
     Args:
-        decision (dict): 거래 결정 정보
+        decision (dict): 거래 결정 정보 (Gemini 제안 TP/SL 포함)
         entry_price (float): 진입 가격
         atr_value (float): ATR 값
         thresholds (dict): 시장 상황별 지표 임계값
@@ -1111,68 +1073,46 @@ def compute_risk_reward(decision, entry_price, atr_value, thresholds, market_reg
 
     Returns:
         tuple: (Risk/Reward Ratio, Take Profit Price, Stop Loss Price) 또는 (None, None, None)
+        -> 유효하면 (rr_ratio, tp_price_str, sl_price_str) 반환.  유효하지 않으면 (None, None, None) 반환.
     """
     try:
+        # decision에 이미 문자열로 저장된 tp_price, sl_price를 float으로 변환
+        tp_price = float(decision["tp_price"])
+        sl_price = float(decision["sl_price"])
+
         if "sideways" in market_regime.lower():  # 횡보장일 경우
-            # Donchian Channel 기반 TP/SL 계산
+            # Donchian Channel 기반 TP/SL 계산 (검증 로직)
             if decision["final_action"].upper() == "GO LONG":
-                tp_price = donchian_upper  # 상단에서 매도
-                sl_price = entry_price - (entry_price - donchian_lower) * thresholds.get('atr_stop_loss_multiplier',
-                                                                                         1.0)  # 하단 이탈 방지
-                # Entry Price가 Donchian Lower와 너무 가까우면, SL이 너무 타이트해질 수 있음. 이 경우, SL을 Donchian Lower 바로 아래로 설정.
-                sl_price = min(sl_price, donchian_lower - 0.01 * entry_price)  # 0.01은 예시 (1% 아래). 값 조정 필요.
                 reward = tp_price - entry_price
                 risk = entry_price - sl_price
 
             elif decision["final_action"].upper() == "GO SHORT":
-                tp_price = donchian_lower  # 하단에서 매수
-                sl_price = entry_price + (donchian_upper - entry_price) * thresholds.get('atr_stop_loss_multiplier',
-                                                                                         1.0)  # 상단 이탈 방지
-                # Entry Price가 Donchian Upper와 너무 가까우면, SL이 너무 타이트. 이 경우, SL을 Donchian Upper 바로 위로.
-                sl_price = max(sl_price, donchian_upper + 0.01 * entry_price)
                 reward = entry_price - tp_price
                 risk = sl_price - entry_price
 
             else:
                 return None, None, None
 
-            if risk <= 0:
-                return None, None, None
-
-            rr_ratio = reward / risk
-            tp_price_str = f"{tp_price:.2f}"
-            sl_price_str = f"{sl_price:.2f}"
-            return rr_ratio, tp_price_str, sl_price_str
 
         else:  # 추세장일 경우
-            # ATR 기반 TP/SL 계산 (기존 로직)
-            atr_multiplier_sl = thresholds.get('atr_stop_loss_multiplier', 1.5)
-            atr_multiplier_tp = thresholds.get('atr_take_profit_multiplier', 2.0)
-
-            stop_loss_atr = atr_multiplier_sl * atr_value
-            take_profit_atr = atr_multiplier_tp * atr_value
-
+            # ATR 기반 TP/SL 계산 (검증 로직)
             if decision["final_action"].upper() == "GO LONG":
-                sl_price = entry_price - stop_loss_atr
-                tp_price = entry_price + take_profit_atr
                 reward = tp_price - entry_price
                 risk = entry_price - sl_price
 
             elif decision["final_action"].upper() == "GO SHORT":
-                sl_price = entry_price + stop_loss_atr
-                tp_price = entry_price - take_profit_atr
                 reward = entry_price - tp_price
                 risk = sl_price - entry_price
             else:
                 return None, None, None
 
-            if risk <= 0:
-                return None, None, None
+        if risk <= 0 or reward <= 0:  # TP, SL 가격이 적절하지 않을 때
+            return None, None, None
 
-            rr_ratio = reward / risk
-            tp_price_str = f"{tp_price:.2f}"
-            sl_price_str = f"{sl_price:.2f}"
-            return rr_ratio, tp_price_str, sl_price_str
+        rr_ratio = reward / risk
+        tp_price_str = f"{tp_price:.2f}"
+        sl_price_str = f"{sl_price:.2f}"
+        return rr_ratio, tp_price_str, sl_price_str
 
 
     except Exception as e:
@@ -1562,7 +1502,7 @@ def get_timeframe_agreement(multi_tf_data, market_regime):
 
 def main():
     logging.info("Trading bot started.")
-    wallet_balance = "1000 USDT"
+    wallet_balance = "1000"
     position_info = "NONE"
     in_position = False
     current_side = None
@@ -1669,43 +1609,60 @@ def main():
 
     rr_text = decision.get("rr_ratio", "N/A")  # decision 딕셔너리에서 R/R ratio text 가져오기
 
-    # 텔레그램 메시지 전송 (더 상세하고, Markdown 포맷 적용)
-    if decision["final_action"].upper() in ["GO LONG", "GO SHORT"]:
-        side = "Buy" if decision["final_action"].upper() == "GO LONG" else "Sell"
-        message = (
-            f"*Trading Signal: {side} {SYMBOL}*\n\n"  # Bold 적용, Symbol 추가
-            f"- **Market Regime:** {regime.upper()}\n"  # 장세 정보 추가
-            f"- **Primary Timeframe:** {primary_tf}\n"  # Primary TF 정보 추가
-            f"- **Confidence Level:** {confidence_level} ({agreement_score} agreement)\n"  # Confidence Level 추가
-            f"- **R/R Ratio:** {rr_text}\n"
-            f"- **Leverage:** {decision['leverage']}\n"
-            f"- **Trade Term:** {decision['trade_term']}\n"
-            f"- **Limit Order Price:** {decision['limit_order_price']}\n"
-            f"- **Take Profit:** {decision['tp_price']}\n"
-            f"- **Stop Loss:** {decision['sl_price']}\n\n"
-            f"**Rationale:** {decision['rationale']}"  # Bold 적용
-        )
-        send_telegram_message(message)  # 텔레그램 메시지 전송 함수 호출
-
+    # 거래 로직 및 텔레그램 메시지 전송 (수정)
     if not in_position:
-        if rr_ratio and rr_ratio >= 2 and decision["final_action"].upper() in ["GO LONG", "GO SHORT"]:
+        # rr_ratio >= 2 조건 제거.  Gemini가 제안한 TP/SL이 유효하고, GO LONG/SHORT이면 거래.
+        if rr_ratio is not None and decision["final_action"].upper() in ["GO LONG", "GO SHORT"]:
             logging.info(
                 f"Opening {decision['final_action']} position @ {cprice}, TP={decision['tp_price']}, SL={decision['sl_price']}")
             log_open_position(SYMBOL, decision, cprice)
             in_position = True
             current_side = decision["final_action"].split()[-1]
             entry_price = cprice
+
+            # 거래 후 텔레그램 메시지 전송
+            side = "🟢 매수" if current_side == "LONG" else "🔴 매도"
+            message = (
+                f"*{side} 포지션 진입* ({SYMBOL})\n\n"
+                f"*레버리지:* {decision['leverage']}x\n"
+                f"*기간:* {decision['trade_term']}\n"
+                f"*진입 가격:* {entry_price}\n"
+                f"*목표 가격 (TP):* {decision['tp_price']}\n"
+                f"*손절 가격 (SL):* {decision['sl_price']}\n"
+                f"*R/R Ratio:* {rr_text}\n\n"
+                f"*분석:* {escape_markdown_v2(decision['rationale'])}"
+            )
+            send_telegram_message(message)
+
         else:
-            logging.info(f"No new position. R/R Ratio: {rr_text}, Action: {decision['final_action']}")
-    else:
+            # 거래 안 함 (No Trade) - 텔레그램 메시지
+            message = (
+                f"*거래 없음 (NO TRADE)*\n\n"
+                f"*이유:* {escape_markdown_v2(decision['rationale'])}\n"
+                f"*R/R Ratio:* {rr_text}"  # R/R Ratio가 None일 경우도 처리
+            )
+            send_telegram_message(message)
+
+    else:  # 이미 포지션 있는 경우
         if decision["final_action"].upper() not in ["HOLD LONG", "HOLD SHORT"]:
             logging.info(f"Exiting {current_side} position @ {cprice}")
             log_closed_position(SYMBOL, entry_price, cprice, current_side)
-            in_position = False
+
+            # 포지션 청산 후 텔레그램 메시지 전송
+            side = "🟢 매수" if current_side == "LONG" else "🔴 매도"  # 이모지
+            profit = (cprice - entry_price) if current_side == "LONG" else (entry_price - cprice)
+            message = (
+                f"*{side} 포지션 청산* ({SYMBOL})\n\n"
+                f"*진입 가격:* {entry_price}\n"
+                f"*청산 가격:* {cprice}\n"
+                f"*수익:* {profit:.2f}\n\n"  # 소수점 둘째 자리
+                f"*근거:* {escape_markdown_v2(decision['rationale'])}"
+            )
+            send_telegram_message(message)
+
+            in_position = False  # 포지션 종료
         else:
             logging.info(f"Holding current {current_side} position.")
-
-    logging.info("Trading bot cycle completed.\n" + "=" * 50)  # Cycle Log 구분선
 
 
 if __name__ == "__main__":
