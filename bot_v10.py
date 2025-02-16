@@ -1056,8 +1056,8 @@ def generate_trading_decision(multi_tf_data, market_regime, strategy, thresholds
 
     sys_instruct = "You are a world-class cryptocurrency trader specializing in BTC/USDT."
     response = gemini_client.models.generate_content(
-        # model="gemini-2.0-pro-exp-02-05",
-        model="gemini-2.0-flash-thinking-exp-01-21",
+        model="gemini-2.0-pro-exp-02-05",
+        # model="gemini-2.0-flash-thinking-exp-01-21",
         config=types.GenerateContentConfig(system_instruction=sys_instruct),
         contents=[prompt_part_1, image, prompt_part_2]  # 이미지 추가
     )
@@ -1190,7 +1190,7 @@ def create_hyperliquid_order(symbol, decision, leverage):
             },
             {  # 2. Take Profit (TP) 주문
                 'symbol': symbol,
-                'type': order_type,  # 또는 'limit' (Hyperliquid API 문서 확인 필요)
+                'type': order_type,
                 'side': 'sell',
                 'amount': amount,
                 'price': tp_price,
@@ -1199,7 +1199,7 @@ def create_hyperliquid_order(symbol, decision, leverage):
             },
             {  # 3. Stop Loss (SL) 주문
                 'symbol': symbol,
-                'type': order_type,  # 또는 'limit' (Hyperliquid API 문서 확인 필요)
+                'type': order_type,
                 'side': 'sell',
                 'amount': amount,
                 'price': sl_price,
