@@ -1193,11 +1193,24 @@ If GO LONG or GO SHORT, also determine:
 - **Take Profit Price:** (Consider setting TP near resistance levels (for long positions) or support levels (for short positions).  You can also use the ATR-based suggestion or a combination of both.)
 - **Stop Loss Price:** (Consider setting SL near support levels (for long positions) or resistance levels (for short positions). You can also use the ATR-based suggestion or a combination of both. Prioritize risk management:  **Your SL should never risk more than 5% of your account balance.**)
 - **Limit Order Price:**
-- **Rationale:** (Explain your decision, including liquidation map, indicators, and market context.)
 
 **Output Format (Comma-Separated):**
 
-Final Action, Recommended Leverage, Trade Term, Take Profit Price, Stop Loss Price, Limit Order Price, Rationale
+Final Action, Recommended Leverage, Trade Term, Take Profit Price, Stop Loss Price, Limit Order Price
+
+**Example Outputs:**
+
+```
+GO LONG, 5x, 1d, 48500.00, 46000.00, 47050.00
+```
+
+```
+GO SHORT, 3x, 6h, 45000.00, 47500.00, 46800.00
+```
+
+```
+NO TRADE, N/A, N/A, N/A, N/A, N/A
+```
 """
 
     return prompt_text_1, prompt_text_2
