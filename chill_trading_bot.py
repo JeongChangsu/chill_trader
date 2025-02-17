@@ -1493,8 +1493,12 @@ def generate_gemini_prompt(multi_tf_data, market_regime, strategy, thresholds,
     support_levels_str = ", ".join([f"{level:.2f}" for level in thresholds["support_levels"]])
     resistance_levels_str = ", ".join([f"{level:.2f}" for level in thresholds["resistance_levels"]])
 
+    current_price = exchange.fetch_ticker('BTC/USDC:USDC')['last']
+
     prompt_text_1 = f"""
 **Objective:** Make optimal trading decisions for BTC/USDT.
+
+**Current price:** {current_price}
 
 **Market Context:**
 - Regime: **{market_regime.upper()}**
@@ -1750,6 +1754,22 @@ def create_hyperliquid_order(symbol, decision, leverage):
         # TP/SL 가격 (문자열 -> 숫자)
         tp_price = float(decision['tp_price'])
         sl_price = float(decision['sl_price'])
+
+        # TP/SL 가격 검증 및 조정
+        if decision['final_action'] == 'GO LONG':
+            if tp_price <= price:  # TP가 진입 가격보다 낮거나 같으면
+                return None
+                # tp_price = price + (price * 0.01)  # 진입 가격보다 1% 높게 설정 (예시)
+            if sl_price >= price:  # SL가격이 진입 가격보다 높거나 같으면
+                return None
+                # sl_price = price - (price * 0.01)
+        elif decision['final_action'] == 'GO SHORT':
+            if tp_price >= price:  # TP가 진입 가격보다 높거나 같으면
+                return None
+                # tp_price = price - (price * 0.01)  # 진입 가격보다 1% 낮게 설정 (예시)
+            if sl_price <= price:  # SL가격이 진입 가격보다 낮거나 같으면
+                return None
+                # sl_price = price + (price * 0.01)
 
         exchange.set_margin_mode('isolated', symbol, params={'leverage': leverage})
 
