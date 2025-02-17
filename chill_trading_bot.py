@@ -507,7 +507,7 @@ def fetch_liquidation_map():
     try:
         driver = get_driver()
         driver.get(url)
-        time.sleep(5)  # Increased wait time
+        time.sleep(3)  # Increased wait time
 
         if driver.find_element(By.XPATH, '//span[@class="anticon anticon-camera"]').is_displayed():
             driver.find_element(By.XPATH, '//span[@class="anticon anticon-camera"]').click()
@@ -527,14 +527,14 @@ def fetch_chart(tf):
     try:
         driver = get_driver()
         driver.get(url)
-        time.sleep(3)  # Increased wait time
+        time.sleep(2)  # Increased wait time
 
         tf_str = timeframe_str_for_chart(tf)
         if driver.find_element(By.XPATH, '//div[@id="header-toolbar-intervals"]//button').is_displayed():
             driver.find_element(By.XPATH, '//div[@id="header-toolbar-intervals"]//button').click()
             time.sleep(1)
             driver.find_element(By.XPATH, f'//span[text()="{tf_str}"]').click()
-            time.sleep(3)
+            time.sleep(2)
             chart_screenshot(driver)
             time.sleep(1)
             driver.close()
@@ -2130,7 +2130,7 @@ def main():
     # 9. 거래 실행
     if decision['final_action'].upper() == 'NO TRADE':
         logging.info("No Trade")
-        send_telegram_message(f"*거래 없음 (NO TRADE)*\n\n*이유:* {escape_markdown_v2(decision['rationale'])}")  # 텔레그램 메시지 전송
+        # send_telegram_message(f"*거래 없음 (NO TRADE)*\n\n*이유:* {escape_markdown_v2(decision['rationale'])}")  # 텔레그램 메시지 전송
         return
 
     # 자동 매매 로직 (Hyperliquid)
