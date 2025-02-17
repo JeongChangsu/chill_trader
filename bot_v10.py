@@ -36,7 +36,7 @@ logging.basicConfig(
 # 상수 및 API 초기화 (이전 코드와 동일)
 SYMBOL = "BTC/USDT"
 HYPE_SYMBOL = "BTC/USDC:USDC"
-DECISIONS_LOG_FILE = "trading_decisions.csv"
+DECISIONS_LOG_FILE = "/Users/changpt/PycharmProjects/chill_trader/trading_decisions.csv"
 CLOSED_POSITIONS_FILE = "closed_positions.csv"
 TIMEFRAMES = {
     "5m": "5m",
@@ -321,18 +321,31 @@ def fetch_funding_rate(symbol):
         return "N/A"
 
 
-def fetch_open_interest(symbol):
+def fetch_open_interest(symbol, timeframe='1h', limit=5):  # timeframe, limit 파라미터 추가
     """
-    Binance Futures 데이터를 이용하여 open interest 데이터를 가져온다.
+    Binance Futures 데이터를 이용하여 open interest 데이터 및 변화량을 가져온다.
     """
     try:
-        oi_response = exchange.fetch_open_interest(symbol=symbol)
-        open_interest = oi_response['openInterest'] if oi_response and 'openInterest' in oi_response else None
-        logging.info(f"{symbol} open interest fetched successfully")
-        return open_interest
+        # Binance의 fetch_open_interest_history 사용
+        binanace_exchange = ccxt.binance({'options': {'defaultType': 'future'}})
+        oi_history = binanace_exchange.fetch_open_interest_history(symbol, timeframe, limit=limit)
+
+        # 최신 OI 값 (리스트의 마지막 요소)
+        current_oi = oi_history[-1]['openInterestAmount']
+
+        # 이전 OI 값들의 평균 (limit 개수만큼)
+        previous_oi_values = [item['openInterestAmount'] for item in oi_history[:-1]]
+        previous_oi_avg = sum(previous_oi_values) / len(previous_oi_values) if previous_oi_values else 0
+
+        # 변화량 계산
+        oi_change = current_oi - previous_oi_avg
+
+        logging.info(f"{symbol} open interest history fetched from Binance")
+        return current_oi, oi_change
+
     except Exception as e:
-        logging.error(f"Error fetching open interest for {symbol}: {e}")
-        return "N/A"
+        logging.error(f"Error fetching open interest history for {symbol} from Binance: {e}")
+        return "N/A", 0
 
 
 def fetch_fear_and_greed_index():
@@ -492,62 +505,82 @@ def fetch_liquidation_map():
 # 7. 시장 상황(장세) 결정 및 지표 임계값 조정
 # =====================================================
 
-def determine_market_regime(multi_tf_data):
+def determine_market_regime(multi_tf_data, additional_data, current_session):
     """
-    강화된 알고리즘을 사용하여 시장 상황(장세)을 결정합니다.
-
-    Args:
-        multi_tf_data (dict): 여러 타임프레임의 OHLCV 및 기술적 지표 데이터
-
-    Returns:
-        str: 결정된 시장 상황 (e.g., "strong_bull_trend", "weak_bear_trend", "high_volatility_sideways", etc.)
+    개선된 알고리즘을 사용하여 시장 상황(장세)을 결정.
+    오픈 인터레스트, 펀딩 레이트 변화, 세션 정보 포함.
     """
     if not multi_tf_data:
         return "undefined"
 
-    # 1. 변동성 판단 (Volatility)
+    # 1. 변동성 판단 (Volatility) - ATR, Bollinger Bands
     volatility = "normal"
     atr_1h = multi_tf_data.get("1h", {}).get("atr", 0)
-    price_1h = multi_tf_data.get("1h", {}).get("current_price", 1)  # Avoid division by zero
+    price_1h = multi_tf_data.get("1h", {}).get("current_price", 1)
 
-    if atr_1h / price_1h > 0.025:  # ATR/Price 비율이 2.5% 초과 시 (임계값 조정 가능)
+    # ATR 기반 변동성 판단 (백분율)
+    atr_percent = (atr_1h / price_1h) * 100
+
+    if atr_percent > 2.5:  # 1시간봉 ATR이 가격의 2.5% 초과
         volatility = "high"
-    elif atr_1h / price_1h < 0.005:  # 0.5% 미만 시
+    elif atr_percent < 0.5:  # 1시간봉 ATR이 가격의 0.5% 미만
         volatility = "low"
+
+    # Bollinger Bands Width (1시간봉 기준)
+    bb_width_1h = multi_tf_data.get("1h", {}).get('bb_upper', 0) - multi_tf_data.get("1h", {}).get('bb_lower',
+                                                                                                   0)
+    bb_width_percent_1h = (bb_width_1h / price_1h) * 100 if price_1h else 0
 
     # Donchian Channel Width (1시간봉 기준)
     donchian_width_1h = multi_tf_data.get("1h", {}).get('donchian_upper', 0) - multi_tf_data.get("1h", {}).get(
         'donchian_lower', 0)
-    donchian_width_percent_1h = (donchian_width_1h / price_1h) * 100 if price_1h else 0  # 수정
+    donchian_width_percent_1h = (donchian_width_1h / price_1h) * 100 if price_1h else 0
 
-    # 2. 추세 판단 (Trend)
+    # 2. 추세 판단 (Trend) - EMA, MACD, Aroon, ADX, DMI
     trend = "sideways"  # 기본값: 횡보
+    ema20_1d = multi_tf_data.get("1d", {}).get("ema20", None)
+    ema50_1d = multi_tf_data.get("1d", {}).get("ema50", None)
     ema200_1d = multi_tf_data.get("1d", {}).get("ema200", None)
+
     price_1d = multi_tf_data.get("1d", {}).get("current_price", None)
 
-    if price_1d is not None and ema200_1d is not None:
-        if price_1d > ema200_1d:
-            trend = "bull"  # 가격이 200일 EMA 위에 있으면 상승 추세
-        elif price_1d < ema200_1d:
-            trend = "bear"  # 가격이 200일 EMA 아래에 있으면 하락 추세
+    macd_1h = multi_tf_data.get("1h", {}).get("macd", 0)
+    macd_signal_1h = multi_tf_data.get("1h", {}).get("macd_signal", 0)
 
-    # 3. 추세 강도 (Trend Strength) - ADX, DMI 사용 (1시간봉 기준)
+    aroon_up_1h = multi_tf_data.get("1h", {}).get("aroon_up", 0)
+    aroon_down_1h = multi_tf_data.get("1h", {}).get("aroon_down", 0)
+
+    # EMA, MACD, Aroon을 종합하여 추세 판단
+    if price_1d is not None and ema20_1d is not None and ema50_1d is not None and ema200_1d is not None:
+        if price_1d > ema20_1d and price_1d > ema50_1d and price_1d > ema200_1d:
+            if macd_1h > macd_signal_1h and aroon_up_1h > aroon_down_1h:
+                trend = "bull"  # 강한 상승 추세
+        elif price_1d < ema20_1d and price_1d < ema50_1d and price_1d < ema200_1d:
+            if macd_1h < macd_signal_1h and aroon_down_1h > aroon_up_1h:
+                trend = "bear"  # 강한 하락 추세
+
+    # 3. 추세 강도 (Trend Strength) - ADX, DMI (1시간봉)
     adx_1h = multi_tf_data.get("1h", {}).get("adx", 0)
     plus_di_1h = multi_tf_data.get("1h", {}).get("plus_di", 0)
     minus_di_1h = multi_tf_data.get("1h", {}).get("minus_di", 0)
 
-    if "bull" in trend:
+    if trend == "bull":
         if adx_1h > 25 and plus_di_1h > minus_di_1h:
             trend = "strong_bull"
         elif adx_1h < 20:
             trend = "weak_bull"
-    elif "bear" in trend:
+        else:
+            trend = "undefined_bull"  # 상승 추세는 있지만, 강도가 불분명
+
+    elif trend == "bear":
         if adx_1h > 25 and minus_di_1h > plus_di_1h:
             trend = "strong_bear"
         elif adx_1h < 20:
             trend = "weak_bear"
+        else:
+            trend = "undefined_bear"  # 하락 추세는 있지만, 강도가 불분명
 
-    # 4. 캔들 패턴 (Candle Patterns) - 1시간봉 기준
+    # 4. 캔들 패턴 (Candle Patterns) - 1시간봉
     candle_pattern = "neutral"
     if multi_tf_data.get("1h", {}).get("engulfing_bullish"):
         candle_pattern = "bullish"
@@ -568,136 +601,202 @@ def determine_market_regime(multi_tf_data):
     bearish_div_1h = multi_tf_data.get("1h", {}).get("bearish_divergence", 0)
     bullish_div_1h = multi_tf_data.get("1h", {}).get("bullish_divergence", 0)
 
-    if "bull" in trend and volume_change_1h > 50:  # 가격 상승 중 거래량 급증 (50% 초과, 임계값 조정)
-        volume_analysis = "confirming"  # 추세 확인
-    elif "bear" in trend and volume_change_1h > 50:  # 가격 하락 중 거래량 급증
-        volume_analysis = "confirming"
-    elif bullish_div_1h > 5:  # Bullish Divergence (5회 이상, 조정 가능)
-        volume_analysis = "bullish_divergence"
-    elif bearish_div_1h > 5:  # Bearish Divergence (5회 이상, 조정 가능)
-        volume_analysis = "bearish_divergence"
+    if "bull" in trend and volume_change_1h > 50:
+        volume_analysis = "confirming"  # 거래량 증가, 상승 추세 확인
+    elif "bear" in trend and volume_change_1h > 50:
+        volume_analysis = "confirming"  # 거래량 증가, 하락 추세 확인
+    elif bullish_div_1h > 5:
+        volume_analysis = "bullish_divergence"  # 가격 하락, 거래량 감소 -> 상승 반전 가능성
+    elif bearish_div_1h > 5:
+        volume_analysis = "bearish_divergence"  # 가격 상승, 거래량 감소 -> 하락 반전 가능성
 
-    # 종합적인 시장 상황 판단
-    if trend == "strong_bull" and volume_analysis == "confirming":
+    # 6. 오픈 인터레스트, 펀딩 레이트 분석
+    oi_change = additional_data.get("open_interest_change", 0)
+    funding_rate = additional_data.get("funding_rate", 0)
+
+    oi_fr_signal = "neutral"
+    if oi_change > 1000000 and funding_rate > 0.05:
+        oi_fr_signal = "bearish_reversal_likely"  # 롱 과열, 반전 가능성
+    elif oi_change > 1000000 and funding_rate < -0.05:
+        oi_fr_signal = "bullish_reversal_likely"  # 숏 과열, 반전 가능성
+    elif oi_change > 500000 and -0.01 < funding_rate < 0.01:
+        oi_fr_signal = "trend_continuation"  # 추세 지속
+    elif oi_change < -500000:
+        oi_fr_signal = "trend_weakening"  # 추세 약화
+
+    # 종합적인 시장 상황 판단 (else 제거, 모든 조건 명시)
+    market_regime = ""
+
+    # 추세 관련 조합
+    if trend == "strong_bull":
         market_regime = "strong_bull_trend"
     elif trend == "weak_bull":
         market_regime = "weak_bull_trend"
-    elif trend == "strong_bear" and volume_analysis == "confirming":
+    elif trend == "strong_bear":
         market_regime = "strong_bear_trend"
     elif trend == "weak_bear":
         market_regime = "weak_bear_trend"
+    elif trend == "undefined_bull":
+        market_regime = "undefined_bull_trend"  # 상승 추세는 있지만, 강도 불분명
+    elif trend == "undefined_bear":
+        market_regime = "undefined_bear_trend"  # 하락 추세는 있지만, 강도 불분명
     elif trend == "sideways":
-        if donchian_width_percent_1h < 3:  # 타이트한 횡보
+        if donchian_width_percent_1h < 3:
             market_regime = "tight_sideways"
-        elif donchian_width_percent_1h > 7:  # 넓은 횡보
+        elif donchian_width_percent_1h > 7:
             market_regime = "wide_sideways"
         else:
-            market_regime = "normal_sideways"  # 일반적인 횡보
-    else:
-        market_regime = "undefined_trend"  # 정의되지 않은 추세
+            market_regime = "normal_sideways"
 
     # 변동성 추가
     market_regime = f"{volatility}_volatility_{market_regime}"
 
-    # 캔들 패턴 정보 추가 (필요한 경우)
+    # 캔들 패턴 정보 추가
     if candle_pattern != "neutral":
         market_regime += f"_{candle_pattern}_candle"
 
-    # 거래량 분석 정보 추가 (필요한 경우)
+    # 거래량 분석 정보 추가
     if volume_analysis != "neutral":
         market_regime += f"_{volume_analysis}"
+
+    # 오픈 인터레스트/펀딩 레이트 시그널 추가
+    if oi_fr_signal != "neutral":
+        market_regime += f"_{oi_fr_signal}"
+
+    # 세션별 특성 고려 (추가)
+    if "ASIAN" in current_session:
+        if "sideways" in market_regime:
+            market_regime = "tight_sideways"  # 아시아 세션 + 횡보 -> 타이트한 횡보
+    elif "LONDON" in current_session:
+        if "sideways" in market_regime:
+            market_regime = "normal_sideways"  # 런던 세션 + 횡보 -> 보통 횡보
+    elif "US" in current_session:
+        if "strong" in market_regime:
+            market_regime += "_high_vol"  # US 세션 + 강한 추세 -> 변동성 높음
 
     logging.info(f"Market regime determined: {market_regime.upper()}")
     return market_regime
 
 
-def adjust_indicator_thresholds(market_regime):
+def adjust_indicator_thresholds(market_regime, multi_tf_data):
     """
-    시장 상황에 따라 RSI, MACD, Donchian Channel 등의 임계값을 동적으로 조정하고,
-    각 지표에 대한 가중치를 설정합니다.
+    시장 상황에 따라 지표 임계값, ATR 배수, 지표 가중치를 동적으로 조정. (개선)
     """
     thresholds = {
         "rsi_oversold": 30,
         "rsi_overbought": 70,
         "donchian_window": 20,
-        "indicator_weights": {  # 지표별 가중치 (기본값)
+        "atr_multiplier_tp": 3,  # 기본값
+        "atr_multiplier_sl": 2,  # 기본값
+        "indicator_weights": {
             "rsi": 0.2,
             "macd": 0.2,
             "ema": 0.3,
             "donchian": 0.2,
             "volume": 0.1,
-        }
+            "oi_fr": 0,  # 오픈 인터레스트 & 펀딩 레이트 가중치 (초기값)
+            "aroon": 0.0,  # Aroon 지표 가중치 추가
+        },
+        "support_levels": [],  # 지지선 레벨 (Donchian, EMA 등)
+        "resistance_levels": [],  # 저항선 레벨
     }
 
+    # Donchian Channel, EMA를 지지/저항 레벨로 추가
+    for tf, data in multi_tf_data.items():
+        if data.get("donchian_lower") is not None:
+            thresholds["support_levels"].append(round(data["donchian_lower"], 2))
+        if data.get("donchian_upper") is not None:
+            thresholds["resistance_levels"].append(round(data["donchian_upper"], 2))
+        if data.get("ema20") is not None:
+            thresholds["support_levels"].append(round(data["ema20"], 2))
+            thresholds["resistance_levels"].append(round(data["ema20"], 2))
+        if data.get("ema50") is not None:
+            thresholds["support_levels"].append(round(data["ema50"], 2))
+            thresholds["resistance_levels"].append(round(data["ema50"], 2))
+        # 더 많은 지지/저항 레벨 추가 가능 (예: 피보나치 되돌림)
+
+    # 중복 제거 및 정렬
+    thresholds["support_levels"] = sorted(list(set(thresholds["support_levels"])))
+    thresholds["resistance_levels"] = sorted(list(set(thresholds["resistance_levels"])))
+
+    # 시장 상황에 따른 조정 (더욱 세분화)
     if "strong_bull_trend" in market_regime:
-        thresholds["rsi_oversold"] = 40
-        thresholds["rsi_overbought"] = 80
-        thresholds["donchian_window"] = 25
-        thresholds["indicator_weights"]["ema"] = 0.4  # 추세 추종 강화
-        thresholds["indicator_weights"]["volume"] = 0.2  # 거래량 중요
-        thresholds["indicator_weights"]["rsi"] = 0.15
-        thresholds["indicator_weights"]["macd"] = 0.15
-        thresholds["indicator_weights"]["donchian"] = 0.1
-
-    elif "weak_bull_trend" in market_regime:
-        thresholds["rsi_oversold"] = 35
-        thresholds["rsi_overbought"] = 75
-        thresholds["indicator_weights"]["ema"] = 0.35
-        thresholds["indicator_weights"]["volume"] = 0.15
-        thresholds["indicator_weights"]["rsi"] = 0.25
-
-    elif "strong_bear_trend" in market_regime:
-        thresholds["rsi_oversold"] = 20
-        thresholds["rsi_overbought"] = 60
-        thresholds["donchian_window"] = 25
+        thresholds["atr_multiplier_tp"] = 4  # 더 큰 목표 수익
+        thresholds["atr_multiplier_sl"] = 2.5  # 약간 넓은 SL
         thresholds["indicator_weights"]["ema"] = 0.4
         thresholds["indicator_weights"]["volume"] = 0.2
-        thresholds["indicator_weights"]["rsi"] = 0.15
-        thresholds["indicator_weights"]["macd"] = 0.15
-        thresholds["indicator_weights"]["donchian"] = 0.1
+        thresholds["indicator_weights"]["oi_fr"] = 0.1  # OI/FR 가중치 증가
+        thresholds["indicator_weights"]["aroon"] = 0.1  # Aroon 가중치 추가
+
+    elif "weak_bull_trend" in market_regime:
+        thresholds["atr_multiplier_tp"] = 3
+        thresholds["atr_multiplier_sl"] = 1.8  # 비교적 타이트한 SL
+        thresholds["indicator_weights"]["ema"] = 0.35
+        thresholds["indicator_weights"]["rsi"] = 0.25
+        thresholds["indicator_weights"]["oi_fr"] = 0.15
+        thresholds["indicator_weights"]["aroon"] = 0.05
+
+    elif "strong_bear_trend" in market_regime:
+        thresholds["atr_multiplier_tp"] = 4
+        thresholds["atr_multiplier_sl"] = 2.5
+        thresholds["indicator_weights"]["ema"] = 0.4
+        thresholds["indicator_weights"]["volume"] = 0.2
+        thresholds["indicator_weights"]["oi_fr"] = 0.1
+        thresholds["indicator_weights"]["aroon"] = 0.1  # Aroon 가중치 추가
 
     elif "weak_bear_trend" in market_regime:
-        thresholds["rsi_oversold"] = 25
-        thresholds["rsi_overbought"] = 65
+        thresholds["atr_multiplier_tp"] = 3
+        thresholds["atr_multiplier_sl"] = 1.8
         thresholds["indicator_weights"]["ema"] = 0.35
-        thresholds["indicator_weights"]["volume"] = 0.15
         thresholds["indicator_weights"]["rsi"] = 0.25
+        thresholds["indicator_weights"]["oi_fr"] = 0.15
+        thresholds["indicator_weights"]["aroon"] = 0.05
+
+    elif "undefined_bull_trend" in market_regime:  # 상승 추세 불분명
+        thresholds["atr_multiplier_tp"] = 2.8
+        thresholds["atr_multiplier_sl"] = 1.6
+        thresholds["indicator_weights"]["ema"] = 0.3
+        thresholds["indicator_weights"]["macd"] = 0.25
+        thresholds["indicator_weights"]["aroon"] = 0.15
+        thresholds["indicator_weights"]["oi_fr"] = 0.1
+
+    elif "undefined_bear_trend" in market_regime:  # 하락 추세 불분명
+        thresholds["atr_multiplier_tp"] = 2.8
+        thresholds["atr_multiplier_sl"] = 1.6
+        thresholds["indicator_weights"]["ema"] = 0.3
+        thresholds["indicator_weights"]["macd"] = 0.25
+        thresholds["indicator_weights"]["aroon"] = 0.15
+        thresholds["indicator_weights"]["oi_fr"] = 0.1
 
     elif "tight_sideways" in market_regime:
-        thresholds["rsi_oversold"] = 25
-        thresholds["rsi_overbought"] = 75
-        thresholds["donchian_window"] = 15  # 더 짧은 기간
-        thresholds["indicator_weights"]["donchian"] = 0.4  # Donchian 중요도 증가
-        thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.2
-        thresholds["indicator_weights"]["ema"] = 0.05  # EMA 중요도 감소
-        thresholds["indicator_weights"]["volume"] = 0.05
-
-    elif "wide_sideways" in market_regime:
-        thresholds["rsi_oversold"] = 35
-        thresholds["rsi_overbought"] = 65
-        thresholds["donchian_window"] = 25  # 더 긴 기간
+        thresholds["atr_multiplier_tp"] = 2  # 짧은 TP
+        thresholds["atr_multiplier_sl"] = 1.2  # 매우 타이트한 SL
         thresholds["indicator_weights"]["donchian"] = 0.4
         thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.2
-        thresholds["indicator_weights"]["ema"] = 0.05
-        thresholds["indicator_weights"]["volume"] = 0.05
+        thresholds["indicator_weights"]["oi_fr"] = 0.1
+
+    elif "wide_sideways" in market_regime:
+        thresholds["atr_multiplier_tp"] = 2.5
+        thresholds["atr_multiplier_sl"] = 1.7  # 비교적 넓은 SL
+        thresholds["indicator_weights"]["donchian"] = 0.4
+        thresholds["indicator_weights"]["rsi"] = 0.3
 
     elif "normal_sideways" in market_regime:
+        thresholds["atr_multiplier_tp"] = 2.8
+        thresholds["atr_multiplier_sl"] = 1.5
         thresholds["indicator_weights"]["donchian"] = 0.35
         thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.25
-        thresholds["indicator_weights"]["ema"] = 0.05
-        thresholds["indicator_weights"]["volume"] = 0.05
 
-    # 변동성에 따른 가중치 조정
+    # 변동성에 따른 추가 조정
     if "high_volatility" in market_regime:
-        thresholds["indicator_weights"]["volume"] += 0.1  # 거래량 가중치 증가
-        thresholds["indicator_weights"]["atr"] = 0.2  # ATR 가중치 추가
+        thresholds["atr_multiplier_sl"] += 0.5  # SL 더 넓게
+        thresholds["indicator_weights"]["volume"] += 0.1
+        thresholds["indicator_weights"]["atr"] = 0.2  # ATR 가중치 증가
 
     elif "low_volatility" in market_regime:
-        thresholds["indicator_weights"]["ema"] += 0.1  # EMA 가중치 증가 (저변동성 추세)
-        thresholds["indicator_weights"]["atr"] = 0.05  # ATR
+        thresholds["atr_multiplier_sl"] -= 0.2  # SL 더 타이트하게 (단, 너무 작지 않게)
+        thresholds["indicator_weights"]["ema"] += 0.1
+        thresholds["indicator_weights"]["atr"] = 0.05  # ATR 가중치 감소
 
     return thresholds
 
@@ -709,188 +808,427 @@ def adjust_indicator_thresholds(market_regime):
 strategy_templates = {
     "strong_bull_trend_follow": {
         "name": "Strong Bull Trend Following (Momentum)",
-        "description": "Follow the trend in a strong uptrend.",
+        "description": "강력한 상승 추세 추종",
         "primary_timeframe": "1d",
         "indicators": {
             "ema": {"weight": 0.4, "params": [20, 50, 200]},
-            "rsi": {"weight": 0.2, "params": [14, 40, 80]},
+            "rsi": {"weight": 0.1, "params": [14, 40, 80]},
             "macd": {"weight": 0.1, "params": []},
-            "volume": {"weight": 0.3, "params": []},
+            "volume": {"weight": 0.2, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.1, "params": [25]},  # Aroon 추가
         },
         "entry_rules": {
             "long": [
-                "price > ema20",
-                "price > ema50",
-                "price > ema200",
-                "rsi > 50",
+                "price > ema20_1d",
+                "price > ema50_1d",
+                "price > ema200_1d",
+                "macd > macd_signal",  # MACD 시그널
+                "aroon_up > aroon_down",  # Aroon Up > Aroon Down
                 "volume_change > 20",
             ],
         },
         "exit_rules": {
-            "tp": "atr_multiplier * 3",
-            "sl": "atr_multiplier * 2",
+            "tp": "atr_multiplier * 4",  # 목표 가격 확대
+            "sl": "atr_multiplier * 2.5",  # 손절 범위 조정
         },
         "trade_term": "1d ~ 3d",
         "leverage": "3x ~ 5x"
     },
     "weak_bull_trend_pullback": {
         "name": "Weak Bull Trend Pullback (Dip Buying)",
-        "description": "Buy the dip in a weak uptrend.",
+        "description": "약한 상승 추세에서 눌림목 매수",
         "primary_timeframe": "4h",
         "indicators": {
             "ema": {"weight": 0.35, "params": [20, 50]},
             "rsi": {"weight": 0.35, "params": [14, 35, 75]},
             "macd": {"weight": 0.1, "params": []},
-            "volume": {"weight": 0.2, "params": []},
+            "volume": {"weight": 0.1, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
         },
         "entry_rules": {
             "long": [
-                "price > ema50",
+                "price > ema50_4h",
                 "rsi < 35",
                 "bullish_divergence",
             ],
         },
         "exit_rules": {
-            "tp": "atr_multiplier * 2.5",
-            "sl": "atr_multiplier * 1.5",
+            "tp": "atr_multiplier * 3",
+            "sl": "atr_multiplier * 1.8",
         },
         "trade_term": "6h ~ 1d",
-        "leverage": "2x ~ 4x"
+        "leverage": "3x ~ 5x"
     },
     "strong_bear_trend_follow": {
         "name": "Strong Bear Trend Following (Momentum)",
-        "description": "Follow the trend in a strong downtrend.",
+        "description": "강력한 하락 추세 추종",
         "primary_timeframe": "1d",
         "indicators": {
             "ema": {"weight": 0.4, "params": [20, 50, 200]},
-            "rsi": {"weight": 0.2, "params": [14, 20, 60]},
+            "rsi": {"weight": 0.1, "params": [14, 20, 60]},
             "macd": {"weight": 0.1, "params": []},
-            "volume": {"weight": 0.3, "params": []},
+            "volume": {"weight": 0.2, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.1, "params": [25]},  # Aroon 추가
         },
         "entry_rules": {
             "short": [
-                "price < ema20",
-                "price < ema50",
-                "price < ema200",
-                "rsi < 50",
+                "price < ema20_1d",
+                "price < ema50_1d",
+                "price < ema200_1d",
+                "macd < macd_signal",  # MACD 시그널
+                "aroon_down > aroon_up",  # Aroon Down > Aroon Up
                 "volume_change > 20",
             ],
         },
         "exit_rules": {
-            "tp": "atr_multiplier * 3",
-            "sl": "atr_multiplier * 2",
+            "tp": "atr_multiplier * 4",  # 목표 가격 확대
+            "sl": "atr_multiplier * 2.5",  # 손절 범위 조정
         },
         "trade_term": "1d ~ 3d",
         "leverage": "3x ~ 5x"
     },
     "weak_bear_trend_bounce": {
         "name": "Weak Bear Trend Bounce (Short Selling)",
-        "description": "Sell the rally in a weak downtrend.",
+        "description": "약한 하락 추세에서 반등 매도",
         "primary_timeframe": "4h",
         "indicators": {
             "ema": {"weight": 0.35, "params": [20, 50]},
             "rsi": {"weight": 0.35, "params": [14, 25, 65]},
             "macd": {"weight": 0.1, "params": []},
-            "volume": {"weight": 0.2, "params": []},
+            "volume": {"weight": 0.1, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
         },
         "entry_rules": {
             "short": [
-                "price < ema50",
+                "price < ema50_4h",
                 "rsi > 65",
                 "bearish_divergence",
             ],
         },
         "exit_rules": {
-            "tp": "atr_multiplier * 2.5",
-            "sl": "atr_multiplier * 1.5",
+            "tp": "atr_multiplier * 3",
+            "sl": "atr_multiplier * 1.8",
         },
         "trade_term": "6h ~ 1d",
-        "leverage": "2x ~ 4x"
+        "leverage": "3x ~ 5x"
     },
     "tight_sideways_range": {
         "name": "Tight Sideways Range (Scalping)",
-        "description": "Trade within a narrow range using Donchian Channel.",
+        "description": "좁은 범위 횡보장에서 스캘핑",
         "primary_timeframe": "5m",
         "indicators": {
             "donchian": {"weight": 0.4, "params": [15]},
             "rsi": {"weight": 0.3, "params": [14, 25, 75]},
             "macd": {"weight": 0.2, "params": []},
             "volume": {"weight": 0.1, "params": []},
-            "ema": {"weight": 0.0, "params": []}
+            "ema": {"weight": 0.0, "params": []},
+            "oi_fr": {"weight": 0.0, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
         },
         "entry_rules": {
             "long": [
-                "price <= donchian_lower",
+                "price <= donchian_lower_5m",
                 "rsi < 25",
             ],
             "short": [
-                "price >= donchian_upper",
+                "price >= donchian_upper_5m",
                 "rsi > 75",
             ],
         },
         "exit_rules": {
-            "tp": "donchian_middle",
-            "sl": "donchian_lower - atr * 1",
+            "tp": "donchian_middle_5m",
+            "sl": "donchian_lower_5m - atr * 1",
         },
         "trade_term": "5m ~ 15m",
         "leverage": "5x ~ 10x"
     },
     "wide_sideways_range": {
         "name": "Wide Sideways Range (Range Trading)",
-        "description": "Trade within a wide range using Donchian Channel.",
+        "description": "넓은 범위 횡보장에서 레인지 트레이딩",
         "primary_timeframe": "1h",
         "indicators": {
             "donchian": {"weight": 0.4, "params": [25]},
             "rsi": {"weight": 0.3, "params": [14, 35, 65]},
             "macd": {"weight": 0.2, "params": []},
             "volume": {"weight": 0.1, "params": []},
-            "ema": {"weight": 0.0, "params": []}
+            "ema": {"weight": 0.0, "params": []},
+            "oi_fr": {"weight": 0.0, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
         },
         "entry_rules": {
             "long": [
-                "price <= donchian_lower",
+                "price <= donchian_lower_1h",
                 "rsi < 35",
             ],
             "short": [
-                "price >= donchian_upper",
+                "price >= donchian_upper_1h",
                 "rsi > 65",
             ],
         },
         "exit_rules": {
-            "tp": "donchian_middle",
-            "sl": "donchian_lower - atr * 1.5",
+            "tp": "donchian_middle_1h",
+            "sl": "donchian_lower_1h - atr * 1.5",
         },
         "trade_term": "1h ~ 4h",
         "leverage": "3x ~ 5x"
     },
     "normal_sideways_range": {
         "name": "Normal Sideways Range (Range Trading)",
-        "description": "Trade within a normal range using Donchian Channel.",
+        "description": "보통 범위 횡보장에서 레인지 트레이딩",
         "primary_timeframe": "15m",
         "indicators": {
             "donchian": {"weight": 0.35, "params": [20]},
             "rsi": {"weight": 0.3, "params": [14, 30, 70]},
             "macd": {"weight": 0.25, "params": []},
             "volume": {"weight": 0.05, "params": []},
-            "ema": {"weight": 0.05, "params": []}
+            "ema": {"weight": 0.05, "params": []},
+            "oi_fr": {"weight": 0.0, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
         },
         "entry_rules": {
             "long": [
-                "price <= donchian_lower",
+                "price <= donchian_lower_15m",
                 "rsi < 30",
             ],
             "short": [
-                "price >= donchian_upper",
+                "price >= donchian_upper_15m",
                 "rsi > 70",
             ],
         },
         "exit_rules": {
-            "tp": "donchian_middle",
-            "sl": "donchian_lower - atr * 1.2",
+            "tp": "donchian_middle_15m",
+            "sl": "donchian_lower_15m - atr * 1.2",
         },
         "trade_term": "15m ~ 1h",
         "leverage": "3x ~ 5x"
-    }
+    },
+    "bearish_reversal": {
+        "name": "Bearish Reversal (OI & Funding Rate)",
+        "description": "높은 오픈 인터레스트와 양의 펀딩 레이트를 기반으로 하락 반전 포착",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "oi_fr": {"weight": 0.6, "params": []},
+            "rsi": {"weight": 0.2, "params": [14, 30, 70]},
+            "ema": {"weight": 0.1, "params": [20, 50]},
+            "volume": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+        },
+        "entry_rules": {
+            "short": [
+                "oi_change > 1000000",
+                "funding_rate > 0.05",
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2",
+            "sl": "atr_multiplier * 1.5",
+        },
+        "trade_term": "4h ~ 12h",
+        "leverage": "3x ~ 5x"
+    },
+    "bullish_reversal": {
+        "name": "Bullish Reversal (OI & Funding Rate)",
+        "description": "높은 오픈 인터레스트와 음의 펀딩 레이트를 기반으로 상승 반전 포착",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "oi_fr": {"weight": 0.6, "params": []},
+            "rsi": {"weight": 0.2, "params": [14, 30, 70]},
+            "ema": {"weight": 0.1, "params": [20, 50]},
+            "volume": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+        },
+        "entry_rules": {
+            "long": [
+                "oi_change > 1000000",
+                "funding_rate < -0.05",
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2",
+            "sl": "atr_multiplier * 1.5",
+        },
+        "trade_term": "4h ~ 12h",
+        "leverage": "3x ~ 5x"
+    },
+    "trend_continuation": {
+        "name": "Trend Continuation (OI & Funding Rate)",
+        "description": "오픈 인터레스트와 펀딩 레이트를 기반으로 추세 지속 판단",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "oi_fr": {"weight": 0.6, "params": []},
+            "rsi": {"weight": 0.1, "params": [14, 30, 70]},
+            "ema": {"weight": 0.2, "params": [20, 50]},
+            "volume": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+        },
+        "entry_rules": {
+            "long": [
+                "oi_change > 500000",
+                "funding_rate > -0.01",
+                "funding_rate < 0.01",
+                "price > ema20_1h",  # 가격 조건 추가
+            ],
+            "short": [
+                "oi_change > 500000",
+                "funding_rate > -0.01",
+                "funding_rate < 0.01",
+                "price < ema20_1h",  # 가격 조건 추가
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2",
+            "sl": "atr_multiplier * 1.5",
+        },
+        "trade_term": "4h ~ 12h",
+        "leverage": "3x ~ 5x"
+    },
+    "undefined_bull_trend": {  # 수정: 불분명한 상승 추세
+        "name": "Undefined Bull Trend",
+        "description": "불분명한 상승 추세에서의 전략",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "ema": {"weight": 0.3, "params": [20, 50]},
+            "rsi": {"weight": 0.2, "params": [14, 40, 60]},
+            "macd": {"weight": 0.2, "params": []},
+            "volume": {"weight": 0.1, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.1, "params": [25]},
+        },
+        "entry_rules": {
+            "long": [
+                "price > ema20_1h",
+                "rsi > 40",  # 완만한 상승 조건
+                "bullish_divergence",
+            ],
+            "short": [],  # 필요시 short 규칙 추가
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2.8",
+            "sl": "atr_multiplier * 1.6",
+        },
+        "trade_term": "4h ~ 12h",
+        "leverage": "2x ~ 3x"  # 낮은 레버리지
+    },
+    "undefined_bear_trend": {  # 수정: 불분명한 하락 추세
+        "name": "Undefined Bear Trend",
+        "description": "불분명한 하락 추세에서의 전략",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "ema": {"weight": 0.3, "params": [20, 50]},
+            "rsi": {"weight": 0.2, "params": [14, 40, 60]},
+            "macd": {"weight": 0.2, "params": []},
+            "volume": {"weight": 0.1, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.1, "params": [25]},
+        },
+        "entry_rules": {
+            "long": [],  # 필요시 long 규칙 추가
+            "short": [
+                "price < ema20_1h",
+                "rsi < 60",  # 완만한 하락 조건
+                "bearish_divergence",
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2.8",
+            "sl": "atr_multiplier * 1.6",
+        },
+        "trade_term": "4h ~ 12h",
+        "leverage": "2x ~ 3x"  # 낮은 레버리지
+    },
+
+    # 변동성 돌파 전략 추가
+    "high_volatility_breakout": {
+        "name": "High Volatility Breakout",
+        "description": "높은 변동성 돌파 전략",
+        "primary_timeframe": "15m",  # 짧은 타임프레임
+        "indicators": {
+            "ema": {"weight": 0.2, "params": [20]},
+            "atr": {"weight": 0.3, "params": [14]},  # ATR 중요
+            "volume": {"weight": 0.3, "params": []},
+            "oi_fr": {"weight": 0.1, "params": []},
+            "rsi": {"weight": 0.1, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+
+        },
+        "entry_rules": {
+            "long": [
+                "price > ema20_15m",
+                "volume_change > 50",  # 급격한 거래량 증가
+                "atr > previous_atr * 1.5",  # 이전 ATR보다 1.5배 큰 ATR
+            ],
+            "short": [
+                "price < ema20_15m",
+                "volume_change > 50",
+                "atr > previous_atr * 1.5",
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 3",  # 변동성 고려, 큰 TP
+            "sl": "atr_multiplier * 2",  # 변동성 고려, 넓은 SL
+        },
+        "trade_term": "15m ~ 1h",
+        "leverage": "3x ~ 5x"
+    },
+    # 캔들 패턴 기반 전략 (예시: Bullish Engulfing)
+    "bullish_engulfing_pattern": {
+        "name": "Bullish Engulfing Pattern",
+        "description": "상승 잉태형 캔들 패턴 매매",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "ema": {"weight": 0.2, "params": [50]},  # EMA 추가
+            "engulfing_bullish": {"weight": 0.6, "params": []},  # 캔들 패턴에 높은 가중치
+            "volume": {"weight": 0.2, "params": []},
+            "oi_fr": {"weight": 0.0, "params": []},
+            "rsi": {"weight": 0.0, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+            "macd": {"weight": 0.0, "params": []}
+        },
+        "entry_rules": {
+            "long": [
+                "engulfing_bullish_1h",  # Bullish Engulfing on 1h
+                "price > ema50_1h"  # 가격이 50ema 위에
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2.5",
+            "sl": "atr_multiplier * 1.8",
+        },
+        "trade_term": "1h ~ 4h",
+        "leverage": "3x ~ 4x"
+    },
+
+    # 캔들 패턴 기반 전략 (예시: Bearish Engulfing)
+    "bearish_engulfing_pattern": {
+        "name": "Bearish Engulfing Pattern",
+        "description": "하락 잉태형 캔들 패턴 매매",
+        "primary_timeframe": "1h",
+        "indicators": {
+            "ema": {"weight": 0.2, "params": [50]},
+            "engulfing_bearish": {"weight": 0.6, "params": []},  # 캔들 패턴에 높은 가중치
+            "volume": {"weight": 0.2, "params": []},
+            "oi_fr": {"weight": 0.0, "params": []},
+            "rsi": {"weight": 0.0, "params": []},
+            "aroon": {"weight": 0.0, "params": [25]},  # Aroon (가중치 0)
+            "macd": {"weight": 0.0, "params": []}
+        },
+        "entry_rules": {
+            "short": [
+                "engulfing_bearish_1h",  # Bearish Engulfing on 1h
+                "price < ema50_1h"
+            ],
+        },
+        "exit_rules": {
+            "tp": "atr_multiplier * 2.5",
+            "sl": "atr_multiplier * 1.8",
+        },
+        "trade_term": "1h ~ 4h",
+        "leverage": "3x ~ 4x"
+    },
 }
 
 
@@ -900,8 +1238,22 @@ strategy_templates = {
 
 def select_strategy(market_regime):
     """
-    결정된 시장 상황(장세)에 따라 가장 적합한 전략을 선택합니다.
+    결정된 시장 상황(장세)에 따라 가장 적합한 전략을 선택. (개선)
     """
+
+    # 우선순위: 특정 조건 -> 일반적인 조건
+
+    # 1. 캔들 패턴 기반 전략 (가장 먼저 확인)
+    if "bullish_candle" in market_regime:
+        return strategy_templates["bullish_engulfing_pattern"]
+    if "bearish_candle" in market_regime:
+        return strategy_templates["bearish_engulfing_pattern"]
+
+    # 2. 변동성 돌파 전략 (높은 변동성에서 우선)
+    if "high_volatility" in market_regime:
+        return strategy_templates["high_volatility_breakout"]
+
+    # 3. 추세 추종/반전 전략
     if "strong_bull_trend" in market_regime:
         return strategy_templates["strong_bull_trend_follow"]
     elif "weak_bull_trend" in market_regime:
@@ -910,14 +1262,31 @@ def select_strategy(market_regime):
         return strategy_templates["strong_bear_trend_follow"]
     elif "weak_bear_trend" in market_regime:
         return strategy_templates["weak_bear_trend_bounce"]
+
+    # 4. 불분명한 추세 전략
+    elif "undefined_bull_trend" in market_regime:
+        return strategy_templates["undefined_bull_trend"]
+    elif "undefined_bear_trend" in market_regime:
+        return strategy_templates["undefined_bear_trend"]
+
+    # 5. 횡보장 전략
     elif "tight_sideways" in market_regime:
         return strategy_templates["tight_sideways_range"]
     elif "wide_sideways" in market_regime:
         return strategy_templates["wide_sideways_range"]
     elif "normal_sideways" in market_regime:
         return strategy_templates["normal_sideways_range"]
-    else:
-        return None  # 적합한 전략 없음
+
+    # 6. OI/FR 기반 전략
+    elif "bearish_reversal_likely" in market_regime:
+        return strategy_templates["bearish_reversal"]
+    elif "bullish_reversal_likely" in market_regime:
+        return strategy_templates["bullish_reversal"]
+    elif "trend_continuation" in market_regime:
+        return strategy_templates["trend_continuation"]
+
+    # 어떤 전략도 선택되지 않은 경우
+    return None
 
 
 # =====================================================
@@ -942,7 +1311,9 @@ def generate_gemini_prompt(multi_tf_data, market_regime, strategy, thresholds,
         indicators_summary += f"  - Price: {data['current_price']:.2f}\n"
         for ind_name, ind_params in strategy["indicators"].items():
             if ind_name in data and data[ind_name] is not None:
-                indicators_summary += f"  - {ind_name.upper()}: {data[ind_name]:.2f}\n"
+                # 지표가 'oi_fr' (Open Interest & Funding Rate)가 아닐 때만 값 출력
+                if ind_name != 'oi_fr':
+                    indicators_summary += f"  - {ind_name.upper()}: {data[ind_name]:.2f}\n"
 
     # 진입/청산 규칙
     entry_rules_long = "\n".join([f"  - {rule}" for rule in strategy["entry_rules"].get("long", [])])
@@ -974,6 +1345,10 @@ def generate_gemini_prompt(multi_tf_data, market_regime, strategy, thresholds,
     }
     session_guide = session_guides.get(current_session, "No specific guidance for this session.")
 
+    # 지지/저항 정보 추가 (프롬프트에)
+    support_levels_str = ", ".join([f"{level:.2f}" for level in thresholds["support_levels"]])
+    resistance_levels_str = ", ".join([f"{level:.2f}" for level in thresholds["resistance_levels"]])
+
     prompt_text_1 = f"""
 **Objective:** Make optimal trading decisions for BTC/USDT.
 
@@ -998,6 +1373,7 @@ def generate_gemini_prompt(multi_tf_data, market_regime, strategy, thresholds,
 **Additional Market Data:**
 - Funding Rate: {additional_data.get('funding_rate', 'N/A')}
 - Open Interest: {additional_data.get('open_interest', 'N/A')}
+- Open Interest Change: {additional_data.get('open_interest_change', 'N/A')}
 - Order Book: Bid={additional_data.get('order_book', {}).get('bid', 'N/A')}, Ask={additional_data.get('order_book', {}).get('ask', 'N/A')}, Spread={additional_data.get('order_book', {}).get('spread', 'N/A')}
 - Fear & Greed: {additional_data.get('fear_and_greed_index', ('N/A', 'N/A'))[0]} ({additional_data.get('fear_and_greed_index', ('N/A', 'N/A'))[1]})
 
@@ -1011,13 +1387,17 @@ def generate_gemini_prompt(multi_tf_data, market_regime, strategy, thresholds,
 
 - **Take Profit (TP):** {tp_rule}
 - **Stop Loss (SL):** {sl_rule}
+
+**Key Support Levels:** {support_levels_str}
+**Key Resistance Levels:** {resistance_levels_str}
 """
     prompt_text_2 = f"""
 **Liquidation Map Analysis Guide(Image Provided):**
-- **Support and Resistance:** Identify potential support and resistance levels.
-- **Cascading Liquidations:** Assess the risk of cascading liquidations.
-- **Volatility Prediction:**  Estimate potential volatility.
-- **Risk Assessment:** Compare long vs. short liquidation levels.
+- **Support and Resistance:** Identify potential support and resistance levels based on liquidation clusters.
+- **Cascading Liquidations:** Assess the risk of cascading liquidations (large clusters close to the current price).
+- **Volatility Prediction:** Estimate potential volatility based on the distance between liquidation clusters.
+- **Risk Assessment:** Compare long vs. short liquidation levels to gauge overall market risk.
+- **If the liquidation map provides clear support/resistance levels, use them to inform your TP/SL decisions. If the map is unclear or provides no strong signals, you may rely more on other indicators and market context.** 
 
 **Task:**
 
@@ -1026,8 +1406,8 @@ Based on all provided information, decide: **GO LONG, GO SHORT, or NO TRADE.**
 If GO LONG or GO SHORT, also determine:
 - **Recommended Leverage:** (Based on strategy's recommendation)
 - **Trade Term:** (Based on strategy's recommendation)
-- **Take Profit Price:** 
-- **Stop Loss Price:**
+- **Take Profit Price:** (Consider setting TP near resistance levels (for long positions) or support levels (for short positions).  You can also use the ATR-based suggestion or a combination of both.)
+- **Stop Loss Price:** (Consider setting SL near support levels (for long positions) or resistance levels (for short positions). You can also use the ATR-based suggestion or a combination of both. Prioritize risk management:  **Your SL should never risk more than 5% of your account balance.**)
 - **Limit Order Price:**
 - **Rationale:** (Explain your decision, including liquidation map, indicators, and market context.)
 
@@ -1218,6 +1598,91 @@ def create_hyperliquid_order(symbol, decision, leverage):
         return None
 
 
+def close_expired_positions(symbol):
+    """Hyperliquid 거래소에서 거래 기간이 만료된 포지션을 종료"""
+    try:
+        position = get_hyperliquid_position()
+        orders = exchange.fetch_open_orders(symbol)
+
+        if not orders and not position:
+            return
+
+        utc_entry_time_str = orders[0]['datetime']
+        utc_entry_time = datetime.strptime(utc_entry_time_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+
+        # 한국 시간대로 변환
+        korea_timezone = pytz.timezone('Asia/Seoul')
+
+        # UTC 시간대 정보 추가
+        entry_time = pytz.utc.localize(utc_entry_time).astimezone(korea_timezone)
+        df = pd.read_csv('trading_decisions.csv')
+        trade_term = list(df['trade_term'])[-1]
+
+        now_kst = datetime.now(KST)
+
+        match = re.match(r"(\d+)([mhdw])", trade_term)
+        if not match:
+            logging.warning(f"Invalid trade_term format: {trade_term}")
+            return
+
+        term_value = int(match.group(1))
+        term_unit = match.group(2)
+
+        if term_unit == 'm':
+            expiration_time = entry_time + timedelta(minutes=term_value)
+        elif term_unit == 'h':
+            expiration_time = entry_time + timedelta(hours=term_value)
+        elif term_unit == 'd':
+            expiration_time = entry_time + timedelta(days=term_value)
+        elif term_unit == 'w':
+            expiration_time = entry_time + timedelta(weeks=term_value)
+        else:
+            logging.warning(f"Invalid trade_term unit: {term_unit}")
+            return
+
+        if not position:
+            if len(orders) >= 3:
+                if term_unit == 'm':
+                    if now_kst >= expiration_time:
+                        order_ids = [order['id'] for order in orders]
+                        exchange.cancel_orders(order_ids, symbol)
+                        return
+                else:
+                    if now_kst >= entry_time + timedelta(minutes=30):
+                        order_ids = [order['id'] for order in orders]
+                        exchange.cancel_orders(order_ids, symbol)
+                        return
+
+        if now_kst >= expiration_time:
+            logging.info(f"Closing expired position: {position}")
+            try:
+                close_side = 'sell' if position['side'] == 'long' else 'buy'
+                current_price = exchange.fetch_ticker('BTC/USDC:USDC')['last']
+                closing_order = exchange.create_order(
+                    symbol=symbol,
+                    type='market',
+                    side=close_side,
+                    amount=abs(float(position['contracts'])),
+                    price=current_price,
+                    params={'reduceOnly': True}
+                )
+                logging.info(f"Position closed: {closing_order}")
+                # 텔레그램 메시지 전송 (telegram_utils.py 활용)
+                from telegram_utils import send_telegram_message  # 상대 경로 import
+                send_telegram_message(
+                    f"*포지션 자동 종료* ({symbol})\n\n"
+                    f"*만료 시간:* {expiration_time.strftime('%Y-%m-%d %H:%M:%S (KST)')}\n"
+                    f"*사유:* 거래 기간({trade_term}) 만료"
+                )
+
+            except Exception as e:
+                logging.error(f"Error creating market order on Hyperliquid in close expired positions: {e}")
+                return None
+
+    except Exception as e:
+        logging.error(f"Error closing expired positions: {e}")
+
+
 def calculate_position_size(balance, entry_price, leverage):
     """
     진입 가격과 레버리지를 고려하여 주문 수량을 계산한다. (10의 자리 버림)
@@ -1230,35 +1695,36 @@ def calculate_position_size(balance, entry_price, leverage):
 
 def get_current_session_kst():
     """
-    KST 기준 현재 시간을 확인하여 트레이딩 세션 및 주말/미국 공휴일 여부 결정
+    KST 기준 현재 시간, 미국 공휴일/주말 여부를 고려하여 세션 결정.
     """
-    now = datetime.now(KST)
-    hour = now.hour
+    now_kst = datetime.now(KST)
 
-    # 주말 여부 확인
-    is_weekend = now.weekday() >= 5  # 5: 토요일, 6: 일요일
+    # 주말 여부 (KST 기준)
+    is_weekend = now_kst.weekday() >= 5
 
-    # 미국 공휴일 여부 확인
-    us_holidays = holidays.US()  # 미국 공휴일 객체 생성
-    is_us_holiday = now.date() in us_holidays
+    # 미국 공휴일 여부 (KST 기준)
+    us_holidays = holidays.US(years=now_kst.year)
+    is_us_holiday = now_kst.date() in us_holidays
 
-    if 0 <= hour < 8:
+    # KST 기준 세션
+    hour_kst = now_kst.hour
+    if 0 <= hour_kst < 8:
         session = "OVERNIGHT"
-    elif 8 <= hour < 16:
+    elif 8 <= hour_kst < 16:
         session = "ASIAN"
-    elif 16 <= hour < 22:
+    elif 16 <= hour_kst < 22:
         session = "LONDON"
-    elif 22 <= hour < 24 or 0 <= hour < 6:
+    elif 22 <= hour_kst < 24 or 0 <= hour_kst < 6:
         session = "US"
-    elif 6 <= hour < 8:
+    elif 6 <= hour_kst < 8:
         session = "TRANSITION"
     else:
         session = "UNDEFINED"
 
     if is_weekend:
-        session += "_WEEKEND"  # 주말
+        session += "_WEEKEND"
     if is_us_holiday:
-        session += "_US_HOLIDAY"  # 미국 공휴일
+        session += "_US_HOLIDAY"
 
     return session
 
@@ -1309,26 +1775,30 @@ def escape_markdown_v2(text):
 def main():
     logging.info("Trading bot started.")
 
-    # 초기 포지션 확인
-    in_position = get_hyperliquid_position()
-    if in_position:
-        logging.info("Existing position found. Exiting early.")
+    # 1. 포지션 종료 (거래 기간 만료)
+    close_expired_positions(HYPE_SYMBOL)
+
+    # 2. 초기 포지션 확인
+    position = get_hyperliquid_position()
+    if position:
         return
 
-    # 잔고 확인
+    # 3. 잔고 확인
     balance = get_hyperliquid_balance()
     logging.info(f"Initial balance: {balance:.2f} USDC")
 
-    # 1. 데이터 수집
+    # 4. 데이터 수집
     multi_tf_data = fetch_multi_tf_data(HYPE_SYMBOL, TIMEFRAMES, limit=300)
     if not multi_tf_data:
         logging.error("Failed to fetch multi-timeframe data.")
         return
 
     # 추가 데이터
+    oi, oi_change = fetch_open_interest(SYMBOL)  # SYMBOL 사용 (BTC/USDT)
     additional_data = {
         "funding_rate": fetch_funding_rate(HYPE_SYMBOL),
-        "open_interest": fetch_open_interest(HYPE_SYMBOL),
+        "open_interest": oi,
+        "open_interest_change": oi_change,
         "order_book": fetch_order_book(HYPE_SYMBOL),  # Order Book 데이터 추가
         "fear_and_greed_index": fetch_fear_and_greed_index()
     }
@@ -1337,20 +1807,20 @@ def main():
     econ_data_raw = fetch_economic_data()
     econ_summary = parse_economic_data(econ_data_raw)
 
-    # 2. 시장 상황(장세) 결정
-    market_regime = determine_market_regime(multi_tf_data)
-    thresholds = adjust_indicator_thresholds(market_regime)  # 지표 가중치
+    # 5. 현재 세션 확인
+    current_session = get_current_session_kst()
 
-    # 3. 전략 선택
+    # 6. 시장 상황(장세) 결정
+    market_regime = determine_market_regime(multi_tf_data, additional_data, current_session)
+    thresholds = adjust_indicator_thresholds(market_regime, multi_tf_data)  # 지표 가중치
+
+    # 7. 전략 선택
     strategy = select_strategy(market_regime)
     if not strategy:
         logging.info(f"No suitable strategy found for market regime: {market_regime}")
         return
 
-    # 4. 현재 세션 확인
-    current_session = get_current_session_kst()
-
-    # 5. Gemini Pro를 이용한 최종 거래 결정
+    # 8. Gemini Pro를 이용한 최종 거래 결정
     try:
         fetch_liquidation_map()  # 청산맵 다운로드
         gemini_response_text = generate_trading_decision(
@@ -1370,10 +1840,10 @@ def main():
         logging.error(f"Error in Gemini Pro interaction or decision parsing: {e}")
         return
 
-    # No Trade 결정 시
+    # 9. 거래 실행
     if decision['final_action'].upper() == 'NO TRADE':
         logging.info("No Trade")
-        send_telegram_message(f"*거래 없음 (NO TRADE)*\n\n*이유:* {escape_markdown_v2(decision['rationale'])}")  # 텔레그램 메시지 전송
+        # send_telegram_message(f"*거래 없음 (NO TRADE)*\n\n*이유:* {escape_markdown_v2(decision['rationale'])}")  # 텔레그램 메시지 전송
         return
 
     # 자동 매매 로직 (Hyperliquid)
