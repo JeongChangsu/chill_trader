@@ -121,9 +121,6 @@ def get_driver():
     """
     options = uc.ChromeOptions()
     options = uc.ChromeOptions()
-    options.add_experimental_option("debuggerAddress", "localhost:9222")  # 9222는 위에서 지정한 포트
-    # Configure options if needed (e.g., headless mode)
-    # options.add_argument('--headless') # 필요에 따라 headless 모드 활성화
     driver = uc.Chrome(options=options)
     return driver
 

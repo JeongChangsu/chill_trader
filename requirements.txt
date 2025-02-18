@@ -13,6 +13,7 @@ certifi==2025.1.31
 cffi==1.17.1
 charset-normalizer==3.4.1
 click==8.1.8
+convertdate==2.4.0
 cryptography==44.0.0
 dateparser==1.2.1
 distro==1.9.0
@@ -22,10 +23,12 @@ frozenlist==1.5.0
 google-auth==2.38.0
 google-genai==1.1.0
 h11==0.14.0
+holidays==0.66
 httpcore==1.0.7
 httpx==0.28.1
 idna==3.10
 jiter==0.8.2
+lunardate==0.2.2
 lxml==5.3.0
 multidict==6.1.0
 numpy==1.26.4
@@ -42,6 +45,8 @@ pycparser==2.22
 pycryptodome==3.21.0
 pydantic==2.10.6
 pydantic_core==2.27.2
+pyluach==2.2.0
+PyMeeus==0.5.12
 PySocks==1.7.1
 python-binance==1.0.27
 python-dateutil==2.9.0.post0
@@ -69,5 +74,6 @@ urllib3==2.3.0
 uvicorn==0.34.0
 websocket-client==1.8.0
 websockets==14.2
+workalendar==17.0.0
 wsproto==1.2.0
 yarl==1.18.3
