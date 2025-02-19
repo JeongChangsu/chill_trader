@@ -1,9 +1,9 @@
 import ccxt
-import pandas as pd
-import pandas_ta as ta
 import json
 import logging
-from datetime import datetime, timedelta
+
+import pandas as pd
+import pandas_ta as ta
 
 # 로깅 설정 (PEP8 스타일)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -147,7 +147,7 @@ def analyze_market_situation(df_4h: pd.DataFrame, df_1d: pd.DataFrame) -> dict:
     return analysis_result
 
 
-def main():
+def analyze_market():
     """
     1단계 시장 상황 분석을 수행하는 메인 함수.
     """
@@ -179,9 +179,6 @@ def main():
         print(json_output)
 
         logging.info("Market Situation Analysis Completed.")
+        return json.loads(json_output)
     else:
         logging.warning("Indicator calculation failed. Market situation analysis aborted.")
-
-
-if __name__ == "__main__":
-    main()

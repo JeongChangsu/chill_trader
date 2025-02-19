@@ -1,445 +1,226 @@
-# strategy.py
+import re
+import json
 import logging
-import holidays
 
-from config import KST, SESSION_GUIDES
-from datetime import datetime
+from google import genai  # google.genai import 추가
+from config import GOOGLE_API_KEY  # GOOGLE_API_KEY import 추가
+
+# Gemini Client initialization (updated)
+gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+
+# 로깅 설정 (PEP8 스타일)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def determine_market_regime(multi_tf_data):
+def select_trading_strategy(market_analysis_result: dict) -> dict:
     """
-    강화된 알고리즘을 사용하여 시장 상황(장세)을 결정합니다.
+    시장 분석 결과에 따라 트레이딩 전략을 선택하는 함수 (Gemini API Client 업데이트).
+
+    Args:
+        market_analysis_result (dict): 1단계 시장 분석 결과 (analyze_market() 함수의 출력).
+
+    Returns:
+        dict: 트레이딩 전략 선택 결과 (JSON 포맷).
+              예시: {"selected_trading_strategy": "Momentum Trading", "strategy_choice_rationale": "..."}
     """
-    if not multi_tf_data:
-        return "undefined"
+    try:
+        market_situation_category = market_analysis_result.get("market_situation_category")
+        confidence_level = market_analysis_result.get("confidence_level")
+        supporting_rationale = market_analysis_result.get("supporting_rationale")
 
-    # 1. 변동성 판단 (Volatility)
-    volatility = "normal"
-    atr_1h = multi_tf_data.get("1h", {}).get("atr", 0)
-    price_1h = multi_tf_data.get("1h", {}).get("current_price", 1)
+        if not market_situation_category:
+            raise ValueError("Market situation category is missing from market analysis result.")
 
-    if atr_1h / price_1h > 0.025:
-        volatility = "high"
-    elif atr_1h / price_1h < 0.005:
-        volatility = "low"
+        prompt_text = f"""You are a world-class cryptocurrency trading strategist. Based on the current market situation, please select the most appropriate trading strategy from the following options:
 
-    # Donchian Channel Width (1시간봉 기준)
-    donchian_width_1h = multi_tf_data.get("1h", {}).get('donchian_upper', 0) - multi_tf_data.get("1h", {}).get(
-        'donchian_lower', 0)
-    donchian_width_percent_1h = (donchian_width_1h / price_1h) * 100 if price_1h else 0
+        * Momentum Trading (Trend Following)
+        * Mean Reversion Trading
 
-    # 2. 추세 판단 (Trend)
-    trend = "sideways"  # 기본값: 횡보
-    ema200_1d = multi_tf_data.get("1d", {}).get("ema200", None)
-    price_1d = multi_tf_data.get("1d", {}).get("current_price", None)
+        **Current Market Situation:** {market_situation_category} (Confidence Level: {confidence_level})
+        **Supporting Rationale:** {supporting_rationale} (from Stage 1 Market Analysis)
 
-    if price_1d is not None and ema200_1d is not None:
-        if price_1d > ema200_1d:
-            trend = "bull"  # 가격이 200일 EMA 위에 있으면 상승 추세
-        elif price_1d < ema200_1d:
-            trend = "bear"  # 가격이 200일 EMA 아래에 있으면 하락 추세
+        **Constraints:**
 
-    # 3. 추세 강도 (Trend Strength) - ADX, DMI 사용 (1시간봉 기준)
-    adx_1h = multi_tf_data.get("1h", {}).get("adx", 0)
-    plus_di_1h = multi_tf_data.get("1h", {}).get("plus_di", 0)
-    minus_di_1h = multi_tf_data.get("1h", {}).get("minus_di", 0)
+        * In a **Bull Market**, prioritize **Momentum Trading (Long)** to maximize profit from the upward trend.
+        * In a **Bear Market**, you must choose between **Momentum Trading (Short)** and **Mean Reversion Trading**. Consider the risk level and potential profitability of each strategy in the current Bear Market context. If Momentum Trading (Short) is deemed too risky for automated trading or if the Bear Market is showing signs of range-bound behavior, Mean Reversion Trading might be a safer alternative. Explain your choice.
+        * In a **Range-Bound Market**, use **Mean Reversion Trading** to capitalize on price oscillations within the range.
 
-    if "bull" in trend:
-        if adx_1h > 25 and plus_di_1h > minus_di_1h:
-            trend = "strong_bull"
-        elif adx_1h < 20:
-            trend = "weak_bull"
-    elif "bear" in trend:
-        if adx_1h > 25 and minus_di_1h > plus_di_1h:
-            trend = "strong_bear"
-        elif adx_1h < 20:
-            trend = "weak_bear"
+        **Output Requirements:**
 
-    # 4. 캔들 패턴 (Candle Patterns) - 1시간봉 기준
-    candle_pattern = "neutral"
-    if multi_tf_data.get("1h", {}).get("engulfing_bullish"):
-        candle_pattern = "bullish"
-    elif multi_tf_data.get("1h", {}).get("engulfing_bearish"):
-        candle_pattern = "bearish"
-    elif multi_tf_data.get("1h", {}).get("morning_star"):
-        candle_pattern = "bullish"
-    elif multi_tf_data.get("1h", {}).get("evening_star"):
-        candle_pattern = "bearish"
-    elif multi_tf_data.get("1h", {}).get("hammer"):
-        candle_pattern = "bullish"
-    elif multi_tf_data.get("1h", {}).get("hanging_man"):
-        candle_pattern = "bearish"
+        * **Selected Trading Strategy:** (e.g., "Momentum Trading", "Mean Reversion Trading") - Clearly state the selected strategy.
+        * **Strategy Choice Rationale:** - Briefly explain why you selected the chosen strategy based on the current market situation and constraints.  For Bear Market strategy selection, explicitly justify your choice between Momentum Trading (Short) and Mean Reversion Trading.
 
-    # 5. 거래량 분석 (Volume Analysis)
-    volume_analysis = "neutral"
-    volume_change_1h = multi_tf_data.get("1h", {}).get("volume_change", 0)
-    bearish_div_1h = multi_tf_data.get("1h", {}).get("bearish_divergence", 0)
-    bullish_div_1h = multi_tf_data.get("1h", {}).get("bullish_divergence", 0)
+        **Example Output Format (JSON):**
+        ```json
+        {{
+          "selected_trading_strategy": "Momentum Trading",
+          "strategy_choice_rationale": "The market is classified as a Bull Market with high confidence. Momentum Trading (Long) is the most suitable strategy to capture gains in a strong uptrend."
+        }}
+        ```"""  # JSON 포맷 예시 수정 (중괄호 두 개)
 
-    if "bull" in trend and volume_change_1h > 50:
-        volume_analysis = "confirming"
-    elif "bear" in trend and volume_change_1h > 50:
-        volume_analysis = "confirming"
-    elif bullish_div_1h > 5:
-        volume_analysis = "bullish_divergence"
-    elif bearish_div_1h > 5:
-        volume_analysis = "bearish_divergence"
+        prompt_parts = [prompt_text]  # prompt_parts 배열 생성
 
-    # 종합적인 시장 상황 판단
-    if trend == "strong_bull" and volume_analysis == "confirming":
-        market_regime = "strong_bull_trend"
-    elif trend == "weak_bull":
-        market_regime = "weak_bull_trend"
-    elif trend == "strong_bear" and volume_analysis == "confirming":
-        market_regime = "strong_bear_trend"
-    elif trend == "weak_bear":
-        market_regime = "weak_bear_trend"
-    elif trend == "sideways":
-        if donchian_width_percent_1h < 3:
-            market_regime = "tight_sideways"
-        elif donchian_width_percent_1h > 7:
-            market_regime = "wide_sideways"
-        else:
-            market_regime = "normal_sideways"
-    else:
-        market_regime = "undefined_trend"
+        logging.info("Sending strategy selection prompt to Gemini...")
+        response = gemini_client.models.generate_content(  # Gemini API 호출 방식 업데이트
+            model="gemini-2.0-flash-thinking-exp-01-21",  # 모델명 확인 필요 (최신 모델로 업데이트)
+            # model="gemini-2.0-pro-exp-02-05",  # 모델명 업데이트
+            contents=prompt_parts  # contents 파라미터 사용
+        )
 
-    market_regime = f"{volatility}_volatility_{market_regime}"
+        response_text = response.text  # response.text로 결과 텍스트 획득
+        logging.info(f"Gemini API response for strategy selection: {response_text}")
 
-    if candle_pattern != "neutral":
-        market_regime += f"_{candle_pattern}_candle"
-    if volume_analysis != "neutral":
-        market_regime += f"_{volume_analysis}"
+        gemini_output = re.sub(r"```json\n?(.*?)\n?```", r"\1", response_text, flags=re.DOTALL)
+        strategy_selection_result = json.loads(gemini_output)  # JSON 파싱 오류 가능성 (try-except 처리)
+        selected_strategy = strategy_selection_result.get("selected_trading_strategy")
+        strategy_choice_rationale = strategy_selection_result.get("strategy_choice_rationale")
 
-    logging.info(f"Market regime determined: {market_regime.upper()}")
-    return market_regime
+        if not selected_strategy or not strategy_choice_rationale:
+            raise ValueError("Gemini API response missing 'selected_trading_strategy' or 'strategy_choice_rationale'.")
 
-
-def adjust_indicator_thresholds(market_regime):
-    """시장 상황에 따라 RSI, MACD, Donchian Channel 등의 임계값을 동적으로 조정"""
-    thresholds = {
-        "rsi_oversold": 30,
-        "rsi_overbought": 70,
-        "donchian_window": 20,
-        "indicator_weights": {
-            "rsi": 0.2,
-            "macd": 0.2,
-            "ema": 0.3,
-            "donchian": 0.2,
-            "volume": 0.1,
+        strategy_result = {
+            "selected_trading_strategy": selected_strategy,
+            "strategy_choice_rationale": strategy_choice_rationale
         }
-    }
+        logging.info(f"Trading Strategy Selection Result: {strategy_result}")
+        return strategy_result
 
-    if "strong_bull_trend" in market_regime:
-        thresholds["rsi_oversold"] = 40
-        thresholds["rsi_overbought"] = 80
-        thresholds["donchian_window"] = 25
-        thresholds["indicator_weights"]["ema"] = 0.4
-        thresholds["indicator_weights"]["volume"] = 0.2
-        thresholds["indicator_weights"]["rsi"] = 0.15
-        thresholds["indicator_weights"]["macd"] = 0.15
-        thresholds["indicator_weights"]["donchian"] = 0.1
-
-    elif "weak_bull_trend" in market_regime:
-        thresholds["rsi_oversold"] = 35
-        thresholds["rsi_overbought"] = 75
-        thresholds["indicator_weights"]["ema"] = 0.35
-        thresholds["indicator_weights"]["volume"] = 0.15
-        thresholds["indicator_weights"]["rsi"] = 0.25
-
-    elif "strong_bear_trend" in market_regime:
-        thresholds["rsi_oversold"] = 20
-        thresholds["rsi_overbought"] = 60
-        thresholds["donchian_window"] = 25
-        thresholds["indicator_weights"]["ema"] = 0.4
-        thresholds["indicator_weights"]["volume"] = 0.2
-        thresholds["indicator_weights"]["rsi"] = 0.15
-        thresholds["indicator_weights"]["macd"] = 0.15
-        thresholds["indicator_weights"]["donchian"] = 0.1
-
-    elif "weak_bear_trend" in market_regime:
-        thresholds["rsi_oversold"] = 25
-        thresholds["rsi_overbought"] = 65
-        thresholds["indicator_weights"]["ema"] = 0.35
-        thresholds["indicator_weights"]["volume"] = 0.15
-        thresholds["indicator_weights"]["rsi"] = 0.25
-
-    elif "tight_sideways" in market_regime:
-        thresholds["rsi_oversold"] = 25
-        thresholds["rsi_overbought"] = 75
-        thresholds["donchian_window"] = 15
-        thresholds["indicator_weights"]["donchian"] = 0.4
-        thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.2
-        thresholds["indicator_weights"]["ema"] = 0.05
-        thresholds["indicator_weights"]["volume"] = 0.05
-
-    elif "wide_sideways" in market_regime:
-        thresholds["rsi_oversold"] = 35
-        thresholds["rsi_overbought"] = 65
-        thresholds["donchian_window"] = 25
-        thresholds["indicator_weights"]["donchian"] = 0.4
-        thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.2
-        thresholds["indicator_weights"]["ema"] = 0.05
-        thresholds["indicator_weights"]["volume"] = 0.05
-
-    elif "normal_sideways" in market_regime:
-        thresholds["indicator_weights"]["donchian"] = 0.35
-        thresholds["indicator_weights"]["rsi"] = 0.3
-        thresholds["indicator_weights"]["macd"] = 0.25
-        thresholds["indicator_weights"]["ema"] = 0.05
-        thresholds["indicator_weights"]["volume"] = 0.05
-
-    if "high_volatility" in market_regime:
-        thresholds["indicator_weights"]["volume"] += 0.1
-        thresholds["indicator_weights"]["atr"] = 0.2
-
-    elif "low_volatility" in market_regime:
-        thresholds["indicator_weights"]["ema"] += 0.1
-        thresholds["indicator_weights"]["atr"] = 0.05
-
-    return thresholds
+    except Exception as e:
+        logging.error(f"Error selecting trading strategy: {e}")
+        return {}  # 에러 발생 시 빈 dict 반환 or None 반환 (main.py 에서 처리 방식에 따라 결정)
 
 
-def select_strategy(market_regime):
+def set_strategy_parameters(market_analysis_result: dict, selected_strategy_result: dict) -> dict:
     """
-    결정된 시장 상황(장세)에 따라 가장 적합한 전략을 선택합니다.
+    선택된 트레이딩 전략에 대한 파라미터를 Gemini 모델을 통해 설정하는 함수 (Gemini API Client 업데이트).
+
+    Args:
+        market_analysis_result (dict): 1단계 시장 분석 결과 (analyze_market() 함수의 출력).
+        selected_strategy_result (dict): 트레이딩 전략 선택 결과 (select_trading_strategy() 함수의 출력).
+
+    Returns:
+        dict: 전략 파라미터 설정 결과 (JSON 포맷).
+              예시: {"strategy_parameters": {"MA_short": 50, ...}, "parameter_setting_rationale": "..."}
     """
-    strategy_templates = {  # 이 부분을 strategy.py 안으로 옮김
-        "strong_bull_trend_follow": {
-            "name": "Strong Bull Trend Following (Momentum)",
-            "description": "Follow the trend in a strong uptrend.",
-            "primary_timeframe": "1d",
-            "indicators": {
-                "ema": {"weight": 0.4, "params": [20, 50, 200]},
-                "rsi": {"weight": 0.2, "params": [14, 40, 80]},
-                "macd": {"weight": 0.1, "params": []},
-                "volume": {"weight": 0.3, "params": []},
-            },
-            "entry_rules": {
-                "long": [
-                    "price > ema20",
-                    "price > ema50",
-                    "price > ema200",
-                    "rsi > 50",
-                    "volume_change > 20",
-                ],
-            },
-            "exit_rules": {
-                "tp": "atr_multiplier * 3",
-                "sl": "atr_multiplier * 2",
-            },
-            "trade_term": "1d ~ 3d",
-            "leverage": "3x ~ 5x"
-        },
-        "weak_bull_trend_pullback": {
-            "name": "Weak Bull Trend Pullback (Dip Buying)",
-            "description": "Buy the dip in a weak uptrend.",
-            "primary_timeframe": "4h",
-            "indicators": {
-                "ema": {"weight": 0.35, "params": [20, 50]},
-                "rsi": {"weight": 0.35, "params": [14, 35, 75]},
-                "macd": {"weight": 0.1, "params": []},
-                "volume": {"weight": 0.2, "params": []},
-            },
-            "entry_rules": {
-                "long": [
-                    "price > ema50",
-                    "rsi < 35",
-                    "bullish_divergence",
-                ],
-            },
-            "exit_rules": {
-                "tp": "atr_multiplier * 2.5",
-                "sl": "atr_multiplier * 1.5",
-            },
-            "trade_term": "6h ~ 1d",
-            "leverage": "3x ~ 4x"
-        }, "strong_bear_trend_follow": {
-            "name": "Strong Bear Trend Following (Momentum)",
-            "description": "Follow the trend in a strong downtrend.",
-            "primary_timeframe": "1d",
-            "indicators": {
-                "ema": {"weight": 0.4, "params": [20, 50, 200]},
-                "rsi": {"weight": 0.2, "params": [14, 20, 60]},
-                "macd": {"weight": 0.1, "params": []},
-                "volume": {"weight": 0.3, "params": []},
-            },
-            "entry_rules": {
-                "short": [
-                    "price < ema20",
-                    "price < ema50",
-                    "price < ema200",
-                    "rsi < 50",
-                    "volume_change > 20",
-                ],
-            },
-            "exit_rules": {
-                "tp": "atr_multiplier * 3",
-                "sl": "atr_multiplier * 2",
-            },
-            "trade_term": "1d ~ 3d",
-            "leverage": "3x ~ 5x"
-        },
-        "weak_bear_trend_bounce": {
-            "name": "Weak Bear Trend Bounce (Short Selling)",
-            "description": "Sell the rally in a weak downtrend.",
-            "primary_timeframe": "4h",
-            "indicators": {
-                "ema": {"weight": 0.35, "params": [20, 50]},
-                "rsi": {"weight": 0.35, "params": [14, 25, 65]},
-                "macd": {"weight": 0.1, "params": []},
-                "volume": {"weight": 0.2, "params": []},
-            },
-            "entry_rules": {
-                "short": [
-                    "price < ema50",
-                    "rsi > 65",
-                    "bearish_divergence",
-                ],
-            },
-            "exit_rules": {
-                "tp": "atr_multiplier * 2.5",
-                "sl": "atr_multiplier * 1.5",
-            },
-            "trade_term": "6h ~ 1d",
-            "leverage": "2x ~ 4x"
-        },
-        "tight_sideways_range": {
-            "name": "Tight Sideways Range (Scalping)",
-            "description": "Trade within a narrow range using Donchian Channel.",
-            "primary_timeframe": "5m",
-            "indicators": {
-                "donchian": {"weight": 0.4, "params": [15]},
-                "rsi": {"weight": 0.3, "params": [14, 25, 75]},
-                "macd": {"weight": 0.2, "params": []},
-                "volume": {"weight": 0.1, "params": []},
-                "ema": {"weight": 0.0, "params": []}
-            },
-            "entry_rules": {
-                "long": [
-                    "price <= donchian_lower",
-                    "rsi < 25",
-                ],
-                "short": [
-                    "price >= donchian_upper",
-                    "rsi > 75",
-                ],
-            },
-            "exit_rules": {
-                "tp": "donchian_middle",
-                "sl": "donchian_lower - atr * 1",
-            },
-            "trade_term": "5m ~ 15m",
-            "leverage": "5x ~ 10x"
-        },
-        "wide_sideways_range": {
-            "name": "Wide Sideways Range (Range Trading)",
-            "description": "Trade within a wide range using Donchian Channel.",
-            "primary_timeframe": "1h",
-            "indicators": {
-                "donchian": {"weight": 0.4, "params": [25]},
-                "rsi": {"weight": 0.3, "params": [14, 35, 65]},
-                "macd": {"weight": 0.2, "params": []},
-                "volume": {"weight": 0.1, "params": []},
-                "ema": {"weight": 0.0, "params": []}
-            },
-            "entry_rules": {
-                "long": [
-                    "price <= donchian_lower",
-                    "rsi < 35",
-                ],
-                "short": [
-                    "price >= donchian_upper",
-                    "rsi > 65",
-                ],
-            },
-            "exit_rules": {
-                "tp": "donchian_middle",
-                "sl": "donchian_lower - atr * 1.5",
-            },
-            "trade_term": "1h ~ 4h",
-            "leverage": "3x ~ 5x"
-        },
-        "normal_sideways_range": {
-            "name": "Normal Sideways Range (Range Trading)",
-            "description": "Trade within a normal range using Donchian Channel.",
-            "primary_timeframe": "15m",
-            "indicators": {
-                "donchian": {"weight": 0.35, "params": [20]},
-                "rsi": {"weight": 0.3, "params": [14, 30, 70]},
-                "macd": {"weight": 0.25, "params": []},
-                "volume": {"weight": 0.05, "params": []},
-                "ema": {"weight": 0.05, "params": []}
-            },
-            "entry_rules": {
-                "long": [
-                    "price <= donchian_lower",
-                    "rsi < 30",
-                ],
-                "short": [
-                    "price >= donchian_upper",
-                    "rsi > 70",
-                ],
-            },
-            "exit_rules": {
-                "tp": "donchian_middle",
-                "sl": "donchian_lower - atr * 1.2",
-            },
-            "trade_term": "15m ~ 1h",
-            "leverage": "3x ~ 5x"
+    try:
+        market_situation_category = market_analysis_result.get("market_situation_category")
+        confidence_level = market_analysis_result.get("confidence_level")
+        supporting_rationale = market_analysis_result.get("supporting_rationale")
+        selected_trading_strategy = selected_strategy_result.get("selected_trading_strategy")
+        strategy_choice_rationale = selected_strategy_result.get("strategy_choice_rationale")
+
+        if not selected_trading_strategy:
+            raise ValueError("Selected trading strategy is missing from strategy selection result.")
+
+        prompt_text = f"""You are a world-class cryptocurrency trading expert, skilled in optimizing trading strategy parameters. Based on the current market situation and the selected trading strategy, please determine the optimal parameters for the strategy.
+
+        **Current Market Situation:** {market_situation_category} (Confidence Level: {confidence_level})
+        **Selected Trading Strategy:** {selected_trading_strategy}
+        **Strategy Choice Rationale:** {strategy_choice_rationale} (from Strategy Selection Stage)
+        **Market Analysis Rationale:** {supporting_rationale} (from Stage 1 Market Analysis)
+
+        **Parameter Setting Guidelines:**
+
+        * **For Momentum Trading:**
+            * **Moving Average Periods (MA_short, MA_long):** Suggest appropriate periods for short-term and long-term Moving Averages, considering the current market volatility and trend strength. Provide a range or specific values. (e.g., MA_short: 20-50, MA_long: 100-200)
+            * **RSI Overbought/Oversold Levels (RSI_overbought, RSI_oversold):** Suggest RSI levels for overbought and oversold conditions, optimized for Momentum Trading in the current market. (e.g., RSI_overbought: 70-80, RSI_oversold: 30-40)
+            * **Stop Loss and Take Profit (SL_percentage, TP_ratio):** Recommend Stop Loss percentage (e.g., 1-3% of entry price) and Take Profit ratio (Risk-Reward Ratio, e.g., 1:2, 1:3) suitable for Momentum Trading in this market. Consider using Trailing Stop Loss if appropriate for Bull/Bear Market.
+
+        * **For Mean Reversion Trading:**
+            * **RSI Overbought/Oversold Levels (RSI_overbought, RSI_oversold):** Suggest RSI levels for overbought and oversold conditions, optimized for Mean Reversion Trading in the current market. (e.g., RSI_overbought: 60-70, RSI_oversold: 30-40 - narrower range than Momentum Trading)
+            * **Bollinger Bands Parameters (BB_length, BB_std_dev):** Suggest period and standard deviation for Bollinger Bands, suitable for capturing range-bound price movements. (e.g., BB_length: 20, BB_std_dev: 2)
+            * **Take Profit Percentage (TP_percentage):** Recommend Take Profit percentage for Mean Reversion trades, considering typical range-bound volatility. (e.g., 1-3% of entry price - smaller than Momentum Trading TP)
+            * **Stop Loss Percentage (SL_percentage):** Recommend Stop Loss percentage for Mean Reversion trades. (e.g., 1-2% of entry price - tighter Stop Loss than Momentum Trading)
+
+        **Output Requirements:**
+
+        * **Strategy Parameters:** (JSON format dictionary) - Provide a JSON dictionary containing the recommended parameter values for the selected trading strategy.  The keys should be parameter names (e.g., "MA_short", "RSI_overbought"), and the values should be the suggested numerical values or ranges.
+        * **Parameter Setting Rationale:** - Briefly explain the reasoning behind your parameter recommendations, considering the current market situation and the characteristics of the selected strategy.
+
+        **Example Output Format (JSON):**
+        ```json
+        {{
+          "strategy_parameters": {{
+            "MA_short": 50,
+            "MA_long": 200,
+            "RSI_overbought": 75,
+            "RSI_oversold": 35,
+            "SL_percentage": 2,
+            "TP_ratio": 3
+          }},
+          "parameter_setting_rationale": "Based on the Bull Market conditions, wider RSI overbought/oversold levels and a higher Take Profit ratio are recommended to maximize profit potential.  MA periods are set to standard values for trend identification."
+        }}
+        ```"""  # JSON 포맷 예시 수정 (중괄호 두 개)
+
+        prompt_parts = [prompt_text]  # prompt_parts 배열 생성
+
+        logging.info("Sending strategy parameter setting prompt to Gemini...")
+        response = gemini_client.models.generate_content(  # Gemini API 호출 방식 업데이트
+            model="gemini-2.0-flash-thinking-exp-01-21",  # 모델명 확인 필요 (최신 모델로 업데이트)
+            # model="gemini-2.0-pro-exp-02-05",  # 모델명 업데이트
+            contents=prompt_parts  # contents 파라미터 사용
+        )
+
+        response_text = response.text  # response.text로 결과 텍스트 획득
+        logging.info(f"Gemini API response for strategy selection: {response_text}")
+
+        gemini_output = re.sub(r"```json\n?(.*?)\n?```", r"\1", response_text, flags=re.DOTALL)
+
+        parameter_setting_result = json.loads(gemini_output)  # JSON 파싱 오류 가능성 (try-except 처리)
+        strategy_parameters = parameter_setting_result.get("strategy_parameters")
+        parameter_setting_rationale = parameter_setting_result.get("parameter_setting_rationale")
+
+        if not strategy_parameters or not parameter_setting_rationale:
+            raise ValueError("Gemini API response missing 'strategy_parameters' or 'parameter_setting_rationale'.")
+
+        parameter_result = {
+            "strategy_parameters": strategy_parameters,
+            "parameter_setting_rationale": parameter_setting_rationale
         }
-    }
-
-    if "strong_bull_trend" in market_regime:
-        return strategy_templates["strong_bull_trend_follow"]
-    elif "weak_bull_trend" in market_regime:
-        return strategy_templates["weak_bull_trend_pullback"]
-    elif "strong_bear_trend" in market_regime:
-        return strategy_templates["strong_bear_trend_follow"]
-    elif "weak_bear_trend" in market_regime:
-        return strategy_templates["weak_bear_trend_bounce"]
-    elif "tight_sideways" in market_regime:
-        return strategy_templates["tight_sideways_range"]
-    elif "wide_sideways" in market_regime:
-        return strategy_templates["wide_sideways_range"]
-    elif "normal_sideways" in market_regime:
-        return strategy_templates["normal_sideways_range"]
-    else:
-        return None
+        logging.info(f"Strategy Parameter Setting Result: {parameter_result}")
+        return parameter_result
 
 
-def get_current_session_kst():
+    except Exception as e:
+        logging.error(f"Error setting strategy parameters: {e}")
+        return {}  # 에러 발생 시 빈 dict 반환 or None 반환 (main.py 에서 처리 방식에 따라 결정)
+
+
+def analyze_strategy(market_analysis_result: dict) -> dict:  # gemini_client 인자 제거
     """
-    KST 기준 현재 시간을 확인하여 트레이딩 세션, 주말, 미국 공휴일 여부 결정
+    2단계 트레이딩 전략 선택 및 파라미터 설정 기능을 통합한 메인 함수 (Gemini API Client 업데이트).
+
+    Args:
+        market_analysis_result (dict): 1단계 시장 분석 결과 (analyze_market() 함수의 출력).
+
+    Returns:
+        dict: 2단계 트레이딩 전략 분석 결과 (JSON 포맷).
+              예시: {
+                    "selected_trading_strategy": "Momentum Trading",
+                    "strategy_choice_rationale": "...",
+                    "strategy_parameters": { ... },
+                    "parameter_setting_rationale": "..."
+                  }
     """
-    now = datetime.now(KST)
-    hour = now.hour
+    logging.info("Starting Trading Strategy Analysis...")
 
-    # 주말 여부 확인
-    is_weekend = now.weekday() >= 5
+    if not market_analysis_result:  # market_analysis_result가 비어있는 경우 (None 또는 빈 dict)
+        logging.warning("Market analysis result is empty. Strategy analysis aborted.")
+        return {}  # 빈 dict 반환 or None 반환 (main.py 에서 에러 처리 방식에 따라 결정)
 
-    # 미국 공휴일 여부 확인
-    us_holidays = holidays.US()
-    is_us_holiday = now.date() in us_holidays
+    selected_strategy_result = select_trading_strategy(market_analysis_result)  # gemini_client 인자 제거
+    if not selected_strategy_result:  # 전략 선택 실패 시
+        logging.warning("Strategy selection failed. Strategy analysis aborted.")
+        return {}  # 빈 dict 반환 or None 반환 (main.py 에서 에러 처리 방식에 따라 결정)
 
-    if 0 <= hour < 8:
-        session = "OVERNIGHT"
-    elif 8 <= hour < 16:
-        session = "ASIAN"
-    elif 16 <= hour < 22:
-        session = "LONDON"
-    elif 22 <= hour < 24 or 0 <= hour < 6:
-        session = "US"
-    elif 6 <= hour < 8:
-        session = "TRANSITION"
-    else:
-        session = "UNDEFINED"
+    parameter_setting_result = set_strategy_parameters(market_analysis_result,
+                                                       selected_strategy_result)  # gemini_client 인자 제거
+    if not parameter_setting_result:  # 파라미터 설정 실패 시
+        logging.warning("Strategy parameter setting failed. Strategy analysis aborted.")
+        return {}  # 빈 dict 반환 or None 반환 (main.py 에서 에러 처리 방식에 따라 결정)
 
-    if is_weekend:
-        session += "_WEEKEND"
-    if is_us_holiday:
-        session += "_US_HOLIDAY"
-
-    return session
+    strategy_analysis_result = {**selected_strategy_result,
+                                **parameter_setting_result}  # dict merge (Python 3.5+), or use update()
+    logging.info("Trading Strategy Analysis Completed.")
+    logging.info(f"Trading Strategy Analysis Result: {strategy_analysis_result}")
+    return strategy_analysis_result
