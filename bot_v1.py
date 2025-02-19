@@ -30,8 +30,19 @@ HYPERLIQUID_PRIVATE_KEY = os.environ.get('HYPE_PRIVATE_KEY')
 KST = pytz.timezone('Asia/Seoul')
 DECISIONS_LOG_FILE = f'/Users/changpt/PycharmProjects/chill_trader/decisions_log.csv'  # 의사결정 로깅 파일
 
-liquidation_map_path = "/Users/changpt/Downloads/Liquidation Map.png"
+liquidation_map_path = "/Users/changpt/Downloads/Liquidation Heat Map.png"
 prefix_to_match = "BTCUSD"
+
+symbol = 'BTC/USDC:USDC'
+
+# Hyperliquid 거래소 객체 생성
+exchange = ccxt.hyperliquid({
+    'walletAddress': HYPERLIQUID_WALLET_ADDRESS,
+    'privateKey': HYPERLIQUID_PRIVATE_KEY,
+    'options': {
+        'defaultType': 'swap',  # 선물 거래
+    },
+})
 
 # Telegram variables (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in environment)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -112,7 +123,7 @@ def fetch_liquidation_map():
     """
     청산 히트맵 데이터를 CoinAnk 사이트에서 다운로드한다.
     """
-    url = "https://coinank.com/liqMapChart"
+    url = "https://coinank.com/liqHeatMapChart"
     try:
         driver = get_driver()
         driver.get(url)
@@ -353,7 +364,7 @@ def get_market_data(exchange, symbol):
 
 def calculate_technical_indicators(df):
     """
-    기술적 지표 (MA, MACD, RSI) 계산.
+    기술적 지표 (MA, MACD, RSI, ATR) 계산.
     """
     # 이동평균 (MA)
     df['MA20'] = df['close'].rolling(window=20).mean()
@@ -368,6 +379,9 @@ def calculate_technical_indicators(df):
 
     # RSI
     df['RSI'] = df.ta.rsi()
+
+    # ATR (Average True Range)
+    df['ATR'] = df.ta.atr(length=14)
 
     return df
 
@@ -407,7 +421,7 @@ def is_us_holiday():
 
 def create_prompt(market_data, economic_data_summary, liquidation_map_pil, chart_images, fear_greed_index):
     """
-    Gemini 모델에 전달할 프롬프트 생성.
+    Generates a prompt for the Gemini model.
     """
     prompt_parts = []
 
@@ -415,7 +429,6 @@ def create_prompt(market_data, economic_data_summary, liquidation_map_pil, chart
     system_instruction = """
 You are a world-class, highly successful cryptocurrency trader specializing in Bitcoin.
 You make consistent profits and have a deep understanding of market dynamics, technical analysis, and risk management.
-You are cautious and prioritize capital preservation.
 Your trading decisions are based on a combination of technical and fundamental analysis, as well as market sentiment.
 Your time unit is Korean Standard Time (KST).
 
@@ -429,6 +442,7 @@ Your output format should be strictly JSON:
 "tp_price": "string",
 "sl_price": "string",
 "perspective_duration": "string",
+"market_condition": "string",
 "chart_analysis": "string",
 "liquidation_map_analysis": "string",
 "overall_reasoning": "string"
@@ -436,32 +450,45 @@ Your output format should be strictly JSON:
 
 - 'limit_order_price', 'tp_price', and 'sl_price' should be numbers, represented as strings.
 - 'perspective_duration' format : "number + unit", ex. 5m, 10m, 30m, 1h, 4h, 1d, 2d ...
-- Each analysis (chart, liquidation map, economic events) should be concise, maximum 3 sentences.
+- 'perspective_duration' should be determined based on the timeframe of the chart you primarily analyzed.
+- For example, if you mainly analyzed the 15-minute chart, 'perspective_duration' could be '30m' or '1h'.
+- If you mainly analyzed the 4-hour chart, 'perspective_duration' could be '1d' or '2d'.
+- You must specify both the primary analysis timeframe and the 'perspective_duration'.
+- "market_condition" : Define the current market condition in one word (e.g., "ranging", "uptrend", "downtrend", "choppy", "volatile").
+- Each analysis (chart, liquidation heatmap, economic events) should be concise, maximum 3 sentences.
 - Overall reasoning should clearly state your decision and the combined factors.
 - If it is a weekend or US holiday, reflect that in your analysis.
 - Leverage: always use 3x ~ 5x.
 - Consider price, volume, open interest, funding rates, chart patterns, and Fibonacci levels.
-- Always use "fibonacci" when using information from fibonacci.
+- Always use "fibonacci" when using information from fibonacci retracement or extension.
 - "limit_order_price" should be determined by considering support and resistance level from chart and liquidation map.
 - Set "tp_price" and "sl_price" considering recent volatility and fibonacci levels.
-- Set 'perspective_duration', which represents how long your trading perspective will be maintained, considering current volatility and market conditions.
+- Use ATR (Average True Range) to measure recent volatility. For example, you can set TP at 2 * ATR(14) and SL at 1 * ATR(14) away from the entry price.
+- Use Fibonacci retracement levels (e.g., 0.382, 0.618) or extension levels (e.g., 1.272, 1.618) to set TP and SL, combined with ATR-based levels.
+- Adjust TP and SL levels based on the market structure (support/resistance, trendlines) and liquidation heatmap.
 """
     chart_guide = """
 **Additional Chart Analysis Guide:**
 - Identify candle patterns (e.g., hammer, shooting star, engulfing) and interpret their meanings.
 - Check for volume spikes/drops and analyze their correlation with price movements.
 - Look for golden cross/dead cross occurrences between moving averages.
+- Check if the trend directions of HTF (Higher Time Frame) and LTF (Lower Time Frame) are aligned.
+- For example, consider a long position when both the 4-hour chart and the 15-minute chart are in an uptrend.
+- If the directions of HTF and LTF are different, approach cautiously or refrain from trading.
 """
     liquidation_guide = """
 **Additional Liquidation Map Analysis Guide:**
-- If liquidation levels are concentrated at a specific price level, it is highly likely to act as strong support/resistance.
-- If liquidation levels are skewed in one direction, price movement may accelerate in that direction.
+- This is a 3-day liquidation heatmap. Pay attention to the price levels where liquidation volume is concentrated on the heatmap. These levels can act as strong support or resistance.
+- If the liquidation volume is skewed in one direction, the price may move rapidly in that direction.
+- If you cannot obtain significant information from the 3-day liquidation heatmap, state 'N/A' or 'No significant information' in the 'liquidation_map_analysis'.
+- The goal is not to find support/resistance lines on the liquidation map. It is important to understand market sentiment and potential volatility through the distribution of liquidation volume over the 3-day period.
 """
 
     # Part 2: Market data (text-based)
     market_data_text = f"""
 ## Current Market Data (BTC/USDC)
 
+**Current Price:** {exchange.fetch_ticker(symbol)['last']}
 **Date:** {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} (KST)
 **Weekend/US Holiday:** {is_us_holiday()}
 **Fear & Greed Index:** {fear_greed_index}
@@ -504,6 +531,7 @@ MACD: {df['MACD'].iloc[-1]:.4f}
 MACD_hist: {df['MACD_hist'].iloc[-1]:.4f}
 MACD_signal: {df['MACD_signal'].iloc[-1]:.4f}
 RSI: {df['RSI'].iloc[-1]:.2f}
+ATR: {df['ATR'].iloc[-1]:.2f}
 30-period High: {high_30:.2f}, Low: {low_30:.2f}
 30-period Fibonacci: {fib_levels_30}
 90-period High: {high_90:.2f}, Low: {low_90:.2f}
@@ -531,7 +559,8 @@ def analyze_market(prompt_parts):
     gemini_client = genai.Client(api_key=google_api_key)
 
     response = gemini_client.models.generate_content(
-        model="gemini-2.0-flash-thinking-exp-01-21",
+        # model="gemini-2.0-flash-thinking-exp-01-21",
+        model="gemini-2.0-pro-exp-02-05",
         contents=prompt_parts
     )
 
@@ -866,16 +895,6 @@ def main():
     """
     주기적으로 실행되며, 시장 분석 및 거래 로직 수행.
     """
-    symbol = 'BTC/USDC:USDC'
-
-    # Hyperliquid 거래소 객체 생성
-    exchange = ccxt.hyperliquid({
-        'walletAddress': HYPERLIQUID_WALLET_ADDRESS,
-        'privateKey': HYPERLIQUID_PRIVATE_KEY,
-        'options': {
-            'defaultType': 'swap',  # 선물 거래
-        },
-    })
 
     # 만료된 포지션 정리 (여기서는 30분 미체결 주문 취소만 처리)
     close_expired_positions(symbol)
