@@ -8,7 +8,7 @@ async-timeout==5.0.1
 attrs==25.1.0
 beautifulsoup4==4.13.3
 cachetools==5.5.1
-ccxt==4.4.58
+ccxt==4.4.61
 certifi==2025.1.31
 cffi==1.17.1
 charset-normalizer==3.4.1
