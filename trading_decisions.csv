@@ -1,5 +1,0 @@
-timestamp,symbol,final_action,leverage,trade_term,tp_level,sl_level,limit_order_price,rationale
-2025-02-09 12:02:10.840459,BTC/USDT,SHORT,3x,intraday,-4%,+2%,97323.09,Bearish signals across lower timeframes suggest a failed bounce at the 5m resistance level—placing a short entry there offers a clear pullback opportunity with a 1:2 risk‐reward ratio.
-2025-02-09 12:03:12.443488,ETH/USDT,SHORT,5x,6h,-6%,+3%,2655.7,A bearish bias on the 1h/4h/1d charts outweighs the lower timeframe bullish signals; entering a short near the current bid with a 1:2 risk‑reward ratio is preferred.
-2025-02-09 14:23:22.271503,BTC/USDT,SHORT,3x,6h,-2%,+1%,96120,"Lower timeframe technicals show price below short‐term moving averages with a clear bearish bias and tight spreads, so we enter a short at 96120 expecting a 2:1 risk/reward move."
-2025-02-11 02:41:52.083605,BTC/USDT,GO LONG,2x,intraday,98571.5,97107.56,97107.56,알고리즘 신호에 의해 결정됨 (명확한 다중 타임프레임 합의).
