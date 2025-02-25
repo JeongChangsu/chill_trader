@@ -1,61 +1,42 @@
-from sklearn import linear_model
-import numpy as np
 import talib
+import numpy as np
+from sklearn.linear_model import RANSACRegressor
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler("chart_analyzer.log"), logging.StreamHandler()]
-)
+
+def detect_candle_patterns(df):
+    patterns = {
+        'Hammer': talib.CDLHAMMER(df['open'], df['high'], df['low'], df['close']),
+        'Engulfing': talib.CDLENGULFING(df['open'], df['high'], df['low'], df['close']),
+        'Doji': talib.CDLDOJI(df['open'], df['high'], df['low'], df['close'])
+    }
+    detected = {k: v.iloc[-1] for k, v in patterns.items() if v.iloc[-1] != 0}
+    if detected:
+        logging.info(f"캔들 패턴 탐지: {detected}")
+    return detected
 
 
-class ChartAnalyzer:
-    @staticmethod
-    def detect_trendlines(points):
-        if len(points) < 10:  # 최소 포인트 수
-            logging.warning("Insufficient points for trendline detection")
-            return None
-        x = np.array([p[0] for p in points]).reshape(-1, 1)
-        y = np.array([p[1] for p in points])
-        model = linear_model.RANSACRegressor(max_trials=1000, min_samples=5)
-        model.fit(x, y)
-        slope, intercept = model.estimator_.coef_[0], model.estimator_.intercept_
-        logging.info(f"Trendline detected - Slope: {slope:.4f}, Intercept: {intercept:.2f}")
+def detect_trendlines(df):
+    highs = df['high'][df['high'].rolling(window=5, center=True).max() == df['high']]
+    lows = df['low'][df['low'].rolling(window=5, center=True).min() == df['low']]
+    if len(lows) > 5:
+        X = np.array(lows.index).reshape(-1, 1)
+        y = lows.values
+        ransac = RANSACRegressor()
+        ransac.fit(X, y)
+        slope, intercept = ransac.estimator_.coef_[0], ransac.estimator_.intercept_
+        logging.info(f"추세선 탐지: 기울기={slope:.2f}, 절편={intercept:.2f}")
         return {'slope': slope, 'intercept': intercept}
+    return None
 
-    def analyze_charts(self, candle_data, indicators):
-        analysis = {}
-        for tf, data in candle_data.items():
-            if len(data) < 52:
-                logging.warning(f"[{tf}] Insufficient data for analysis")
-                continue
-            open_p = np.array([candle[1] for candle in data], dtype=float)
-            high = np.array([candle[2] for candle in data], dtype=float)
-            low = np.array([candle[3] for candle in data], dtype=float)
-            close = np.array([candle[4] for candle in data], dtype=float)
-            volume = np.array([candle[5] for candle in data], dtype=float)
 
-            # 캔들 패턴 탐지
-            patterns = {
-                'Hammer': talib.CDLHAMMER(open_p, high, low, close)[-1],
-                'Engulfing': talib.CDLENGULFING(open_p, high, low, close)[-1],
-                'Doji': talib.CDLDOJI(open_p, high, low, close)[-1]
-            }
-            detected_patterns = {k: v for k, v in patterns.items() if v != 0}
-            if detected_patterns:
-                logging.info(f"[{tf}] Detected patterns: {detected_patterns}")
-
-            # 거래량 기반 주요 지점 탐지
-            avg_volume = np.mean(volume)
-            significant_points = [
-                (i, high[i] if high[i] > close[i] else low[i])
-                for i in range(len(volume)) if volume[i] > avg_volume * 1.5
-            ]
-
-            analysis[tf] = {
-                'patterns': detected_patterns,
-                'trendlines': self.detect_trendlines(significant_points),
-                'support_resistance': indicators[tf]['Volume_Profile']['price_levels'][:2].tolist()
-            }
-        return analysis
+def analyze_charts(candle_data):
+    analysis = {}
+    for tf, df in candle_data.items():
+        if df.empty:
+            continue
+        analysis[tf] = {
+            'patterns': detect_candle_patterns(df),
+            'trendline': detect_trendlines(df)
+        }
+    return analysis
